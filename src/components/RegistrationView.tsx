@@ -1,0 +1,1105 @@
+import { useEffect, useState, type FormEvent } from 'react';
+import {
+  AlertCircle,
+  ArrowDown,
+  Check,
+  CheckCircle2,
+  Copy,
+  ExternalLink,
+  Phone,
+  Plus,
+  RotateCcw,
+  Trash2,
+  UserCheck,
+  UserPlus,
+  Users,
+} from 'lucide-react';
+import {
+  BUS_LIST,
+  COLOR_GROUP_LIST,
+  LABELS,
+  PAYMENT_METHOD_LIST,
+  PAYMENT_RECIPIENT_MAP,
+  TICKET_PRICE,
+  type BusKey,
+  type ColorGroupKey,
+  type MemberRecord,
+  type PaymentMethodKey,
+  type RegistrationRecord,
+  type WhatsAppConfig,
+} from '../types/trip';
+import {
+  buildWhatsAppDetails,
+  formatEgyptianPhone,
+  normalizeDigits,
+  validateEgyptianPhone,
+  validateTripleName,
+  type CapacityCounts,
+} from '../utils/validation';
+import { MonasteryBannerImage } from './MonasteryBannerImage';
+import { PaymentMethodIcon } from './PaymentMethodIcon';
+
+interface CompanionDraft {
+  keyId: string;
+  name: string;
+  phone: string;
+  nameTouched: boolean;
+  phoneTouched: boolean;
+}
+
+let companionKeySeq = 1;
+function createEmptyCompanion(): CompanionDraft {
+  companionKeySeq += 1;
+  return {
+    keyId: `comp_${Date.now()}_${companionKeySeq}`,
+    name: '',
+    phone: '',
+    nameTouched: false,
+    phoneTouched: false,
+  };
+}
+
+export interface SubmitBookingResult {
+  ok: boolean;
+  error?: string;
+  created?: RegistrationRecord;
+}
+
+interface RegistrationViewProps {
+  capacities: CapacityCounts;
+  whatsappNumbers: WhatsAppConfig;
+  onAddRegistration: (record: RegistrationRecord) => Promise<SubmitBookingResult>;
+}
+
+export function RegistrationView({
+  capacities,
+  whatsappNumbers,
+  onAddRegistration,
+}: RegistrationViewProps) {
+  const [fullName, setFullName] = useState('');
+  const [nameTouched, setNameTouched] = useState(false);
+
+  const [phoneDigits, setPhoneDigits] = useState('');
+  const [phoneTouched, setPhoneTouched] = useState(false);
+
+  const [regType, setRegType] = useState<'self' | 'group'>('self');
+  const [companions, setCompanions] = useState<CompanionDraft[]>(() => [createEmptyCompanion()]);
+
+  const [busChoice, setBusChoice] = useState<BusKey | ''>('');
+  const [busClickedFull, setBusClickedFull] = useState<string>('');
+
+  const [colorGroup, setColorGroup] = useState<ColorGroupKey | ''>('');
+  const [colorClickedFull, setColorClickedFull] = useState<string>('');
+
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey | ''>('');
+
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string>('');
+  const [confirmedBooking, setConfirmedBooking] = useState<RegistrationRecord | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const totalPersons = regType === 'group' ? 1 + companions.length : 1;
+  const totalPrice = totalPersons * TICKET_PRICE;
+
+  const assignedRecipient = paymentMethod ? PAYMENT_RECIPIENT_MAP[paymentMethod] : null;
+  const assignedWhatsAppRaw =
+    paymentMethod && assignedRecipient
+      ? whatsappNumbers[assignedRecipient][paymentMethod]
+      : '';
+  const assignedWhatsAppDisplay = assignedWhatsAppRaw
+    ? `+${assignedWhatsAppRaw.replace(/^\+/, '')}`
+    : '';
+
+  useEffect(() => {
+    if (busChoice && capacities.buses[busChoice].isFull) {
+      setBusChoice('');
+      setBusClickedFull('البص اتملا — يرجى اختيار الباص الآخر المتاح');
+    }
+  }, [capacities.buses, busChoice]);
+
+  useEffect(() => {
+    if (colorGroup && capacities.colors[colorGroup].isFull) {
+      setColorGroup('');
+      setColorClickedFull('القروب اكتمل — يرجى اختيار قروب لوني آخر متاح');
+    }
+  }, [capacities.colors, colorGroup]);
+
+  useEffect(() => {
+    if (formError) setFormError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalPersons, busChoice, colorGroup, paymentMethod]);
+
+  const mainNameCheck = validateTripleName(fullName);
+  const mainPhoneCheck = validateEgyptianPhone(phoneDigits);
+
+  const selectedBusStat = busChoice ? capacities.buses[busChoice] : null;
+  const selectedBusInsufficient = Boolean(
+    selectedBusStat && !selectedBusStat.isFull && totalPersons > selectedBusStat.remaining
+  );
+
+  const selectedColorStat = colorGroup ? capacities.colors[colorGroup] : null;
+  const selectedColorInsufficient = Boolean(
+    selectedColorStat && !selectedColorStat.isFull && totalPersons > selectedColorStat.remaining
+  );
+
+  const scrollToForm = () => {
+    const formSection = document.getElementById('registration-form');
+    if (formSection) {
+      formSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    setTimeout(() => {
+      document.getElementById('fullName')?.focus({ preventScroll: true });
+    }, 450);
+  };
+
+  const updateCompanion = (keyId: string, patch: Partial<CompanionDraft>) => {
+    setCompanions((prev) => prev.map((c) => (c.keyId === keyId ? { ...c, ...patch } : c)));
+  };
+
+  const addCompanion = () => {
+    setCompanions((prev) => [...prev, createEmptyCompanion()]);
+  };
+
+  const removeCompanion = (keyId: string) => {
+    setCompanions((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((c) => c.keyId !== keyId);
+    });
+  };
+
+  const handleSelectBus = (key: BusKey) => {
+    const stat = capacities.buses[key];
+    if (stat.isFull) {
+      setBusClickedFull('البص اتملا');
+      return;
+    }
+    setBusClickedFull('');
+    setBusChoice(key);
+  };
+
+  const handleSelectColor = (key: ColorGroupKey) => {
+    const stat = capacities.colors[key];
+    if (stat.isFull) {
+      setColorClickedFull('القروب اكتمل');
+      return;
+    }
+    setColorClickedFull('');
+    setColorGroup(key);
+  };
+
+  const resetForm = () => {
+    setFullName('');
+    setNameTouched(false);
+    setPhoneDigits('');
+    setPhoneTouched(false);
+    setRegType('self');
+    setCompanions([createEmptyCompanion()]);
+    setBusChoice('');
+    setBusClickedFull('');
+    setColorGroup('');
+    setColorClickedFull('');
+    setPaymentMethod('');
+    setSubmitAttempted(false);
+    setFormError('');
+    setConfirmedBooking(null);
+    setCopied(false);
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+    setSubmitAttempted(true);
+    setFormError('');
+
+    if (!mainNameCheck.valid) {
+      setFormError(mainNameCheck.message);
+      return;
+    }
+
+    if (!mainPhoneCheck.valid) {
+      setFormError(mainPhoneCheck.message);
+      return;
+    }
+
+    if (regType === 'group') {
+      for (let i = 0; i < companions.length; i++) {
+        const comp = companions[i];
+        const cNameCheck = validateTripleName(comp.name);
+        if (!cNameCheck.valid) {
+          setFormError(`المرافق ${i + 1}: ${cNameCheck.message}`);
+          return;
+        }
+        const cPhoneCheck = validateEgyptianPhone(comp.phone);
+        if (!cPhoneCheck.valid) {
+          setFormError(`المرافق ${i + 1}: ${cPhoneCheck.message}`);
+          return;
+        }
+      }
+    }
+
+    if (!busChoice) {
+      setFormError('يرجى اختيار باص واحد متاح للرحلة');
+      return;
+    }
+
+    const busStat = capacities.buses[busChoice];
+    if (busStat.isFull) {
+      setBusClickedFull('البص اتملا');
+      setFormError('البص اتملا — لا يمكن إتمام التسجيل في هذا الباص');
+      return;
+    }
+    if (totalPersons > busStat.remaining) {
+      setFormError(
+        `تم رفض التسجيل: العدد المطلوب (${totalPersons} أفراد) أكبر من المقاعد المتاحة في ${LABELS.buses[busChoice]}. يمكنك تقليل عدد المرافقين أو اختيار الباص الآخر.`
+      );
+      return;
+    }
+
+    if (!colorGroup) {
+      setFormError('يرجى اختيار قروب لوني واحد متاح');
+      return;
+    }
+
+    const colorStat = capacities.colors[colorGroup];
+    if (colorStat.isFull) {
+      setColorClickedFull('القروب اكتمل');
+      setFormError('القروب اكتمل — لا يمكن إتمام التسجيل في هذا القروب');
+      return;
+    }
+    if (totalPersons > colorStat.remaining) {
+      setFormError(
+        `تم رفض التسجيل: العدد المطلوب (${totalPersons} أفراد) أكبر من المقاعد المتاحة في قروب ${LABELS.colors[colorGroup]}. يمكنك تقليل عدد المرافقين أو اختيار قروب لوني آخر.`
+      );
+      return;
+    }
+
+    if (!paymentMethod || !assignedRecipient) {
+      setFormError('يرجى اختيار طريقة الدفع');
+      return;
+    }
+
+    const regId = Date.now();
+    const members: MemberRecord[] = [
+      {
+        id: `${regId}_0`,
+        name: fullName.trim().replace(/\s+/g, ' '),
+        phone: formatEgyptianPhone(phoneDigits),
+        isMain: true,
+        paid: false,
+        cancelled: false,
+      },
+    ];
+
+    if (regType === 'group') {
+      companions.forEach((comp, idx) => {
+        members.push({
+          id: `${regId}_${idx + 1}`,
+          name: comp.name.trim().replace(/\s+/g, ' '),
+          phone: formatEgyptianPhone(comp.phone),
+          isMain: false,
+          paid: false,
+          cancelled: false,
+        });
+      });
+    }
+
+    const newRecord: RegistrationRecord = {
+      id: regId,
+      isGroup: regType === 'group',
+      members,
+      bus: busChoice,
+      colorGroup,
+      recipient: assignedRecipient,
+      paymentMethod,
+      timestamp: new Date().toLocaleString('ar-EG'),
+    };
+
+    setIsSubmitting(true);
+    try {
+      const result = await onAddRegistration(newRecord);
+      if (!result.ok) {
+        setFormError(result.error || 'تعذر حفظ التسجيل، يرجى المحاولة مرة أخرى.');
+        return;
+      }
+      setConfirmedBooking(result.created ?? newRecord);
+      document
+        .getElementById('registration-form')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCopyMessage = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const whatsappDetails = confirmedBooking
+    ? buildWhatsAppDetails(confirmedBooking, whatsappNumbers)
+    : null;
+
+  return (
+    <div className="space-y-10 pb-16 pt-8 md:pt-12">
+      {/* Unified Hero Header with Direct Scroll-to-Registration CTA */}
+      <section className="mx-auto max-w-[960px] text-center">
+        <h1 className="font-display text-4xl font-extrabold leading-tight tracking-tight text-[#7C4518] sm:text-5xl lg:text-6xl">
+          اجتماع شباب الثلاثة فتية
+        </h1>
+
+        <p className="mt-4 font-display text-xl font-bold text-[#1E1A16] sm:text-2xl lg:text-3xl">
+          رحلة دير القديس العظيم الأنبا أنطونيوس بالبحر الأحمر
+        </p>
+
+        <p className="mt-3 text-base font-medium text-[#5C5349]">
+          قيمة الاشتراك:{' '}
+          <strong className="font-mono-num text-lg font-bold text-[#1E1A16]">
+            {TICKET_PRICE} جنيه للفرد
+          </strong>
+        </p>
+
+        <div className="mt-6 flex items-center justify-center">
+          <button
+            type="button"
+            onClick={scrollToForm}
+            className="inline-flex min-h-[48px] items-center gap-2.5 rounded-lg bg-[#9A5B25] px-8 py-3 text-base font-bold text-white transition-colors hover:bg-[#7C4518] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9A5B25] whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <span>سجّل الآن</span>
+            <ArrowDown className="h-4 w-4" />
+          </button>
+        </div>
+      </section>
+
+      {/* Exact 960x740 Monastery Image directly above the registration details */}
+      <MonasteryBannerImage caption="بوابة دير القديس العظيم الأنبا أنطونيوس العامر — البحر الأحمر" />
+
+      {/* Registration Details & Form Directly Below the Image */}
+      <section id="registration-form" className="mx-auto max-w-[820px] scroll-mt-24">
+        {confirmedBooking && whatsappDetails ? (
+          <div className="rounded-xl border border-emerald-200 bg-white p-6 sm:p-8">
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
+                <CheckCircle2 className="h-7 w-7" />
+              </div>
+              <h2 className="mt-3 font-display text-2xl font-bold text-[#1E1A16]">
+                تم تسجيل بيانات الحجز بنجاح
+              </h2>
+              <p className="mt-1.5 text-sm text-[#5C5349]">
+                كود الحجز:{' '}
+                <strong className="font-mono-num text-[#1E1A16]">{confirmedBooking.id}</strong> ·
+                يرجى الضغط على زر الواتساب أدناه لإرسال رسالة التأكيد وإتمام الدفع لدى{' '}
+                <strong>{LABELS.recipients[confirmedBooking.recipient]}</strong> على الرقم{' '}
+                <strong className="font-mono-num text-[#1E1A16]" dir="ltr">
+                  +{whatsappDetails.phoneNum}
+                </strong>
+                .
+              </p>
+            </div>
+
+            <div className="mt-6 grid grid-cols-1 gap-4 border-y border-[#ECE6DC] py-5 text-sm sm:grid-cols-3">
+              <div>
+                <p className="text-xs text-[#6B6155]">الباص والمجموعة</p>
+                <p className="mt-1 font-bold text-[#1E1A16]">
+                  {LABELS.buses[confirmedBooking.bus]} · قروب{' '}
+                  {LABELS.colors[confirmedBooking.colorGroup]}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-[#6B6155]">المسؤول ووسيلة الدفع</p>
+                <div className="mt-1 flex items-center gap-2 font-bold text-[#1E1A16]">
+                  <PaymentMethodIcon
+                    method={confirmedBooking.paymentMethod}
+                    className="h-6 w-6 shrink-0"
+                  />
+                  <span>
+                    {LABELS.recipients[confirmedBooking.recipient]} ·{' '}
+                    {LABELS.payments[confirmedBooking.paymentMethod]}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <p className="text-xs text-[#6B6155]">الإجمالي المطلوب</p>
+                <p className="mt-1 font-mono-num text-base font-bold text-[#9A5B25]">
+                  {confirmedBooking.members.length * TICKET_PRICE} جنيه (
+                  {confirmedBooking.members.length}{' '}
+                  {confirmedBooking.members.length === 1 ? 'فرد' : 'أفراد'})
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <p className="text-xs font-semibold text-[#6B6155]">الأفراد المسجلون في هذا الحجز</p>
+              <div className="mt-2 divide-y divide-[#EFEAE1] rounded-lg border border-[#E4DDD2] bg-[#FAF8F4]">
+                {confirmedBooking.members.map((m) => (
+                  <div
+                    key={m.id}
+                    className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm"
+                  >
+                    <span className="font-semibold text-[#1E1A16]">
+                      {m.name}{' '}
+                      <span className="text-xs font-normal text-[#6B6155]">
+                        ({m.isMain ? 'المشترك الرئيسي' : 'مرافق'})
+                      </span>
+                    </span>
+                    <span className="font-mono-num text-xs text-[#4E463D]" dir="ltr">
+                      {m.phone}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <p className="text-xs font-semibold text-[#6B6155]">نص رسالة تأكيد الواتساب</p>
+              <pre className="mt-2 whitespace-pre-wrap rounded-lg border border-[#E4DDD2] bg-[#FAF8F4] p-4 font-sans text-sm leading-relaxed text-[#2C2620]">
+                {whatsappDetails.message}
+              </pre>
+            </div>
+
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              <a
+                href={whatsappDetails.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-emerald-800 whitespace-nowrap"
+              >
+                <span>التحويل إلى واتساب ({LABELS.recipients[confirmedBooking.recipient]})</span>
+                <ExternalLink className="h-4 w-4" />
+              </a>
+
+              <button
+                type="button"
+                onClick={() => handleCopyMessage(whatsappDetails.message)}
+                className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-lg border border-[#D8CFC0] bg-white px-5 py-3 text-sm font-semibold text-[#1E1A16] transition-colors hover:bg-[#F5F1E9] whitespace-nowrap cursor-pointer"
+              >
+                {copied ? (
+                  <Check className="h-4 w-4 text-emerald-700" />
+                ) : (
+                  <Copy className="h-4 w-4" />
+                )}
+                <span>{copied ? 'تم النسخ' : 'نسخ الرسالة'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={resetForm}
+                className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-lg border border-[#D8CFC0] bg-white px-5 py-3 text-sm font-semibold text-[#5C5349] transition-colors hover:bg-[#F5F1E9] whitespace-nowrap cursor-pointer"
+              >
+                <RotateCcw className="h-4 w-4" />
+                <span>تسجيل حجز جديد</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form
+            onSubmit={handleSubmit}
+            noValidate
+            className="rounded-xl border border-[#E4DDD2] bg-white p-6 sm:p-8"
+          >
+            <div className="mb-6 border-b border-[#ECE6DC] pb-4 text-center">
+              <h2 className="font-display text-2xl font-extrabold text-[#1E1A16]">
+                استمارة التسجيل في الرحلة
+              </h2>
+              <p className="mt-1 text-xs text-[#6B6155]">
+                املأ البيانات التالية بدقة ثم اضغط تأكيد التسجيل للتحويل مباشرة إلى الواتساب.
+              </p>
+            </div>
+
+            {/* Section 1: Main Attendee */}
+            <div>
+              <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                1. بيانات المشترك الرئيسي
+              </h3>
+              <p className="mt-1 text-xs text-[#6B6155]">
+                يجب كتابة الاسم ثلاثياً فقط، ورقم الهاتف مصرياً مكوناً من 10 أرقام بعد كود مصر +20.
+              </p>
+
+              <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
+                <div>
+                  <label
+                    htmlFor="fullName"
+                    className="mb-1.5 block text-sm font-semibold text-[#1E1A16]"
+                  >
+                    الاسم الثلاثي فقط <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    id="fullName"
+                    type="text"
+                    value={fullName}
+                    onChange={(e) => {
+                      setFullName(e.target.value);
+                      if (!nameTouched) setNameTouched(true);
+                    }}
+                    onBlur={() => setNameTouched(true)}
+                    placeholder="مثال: مينا جرجس بولس"
+                    aria-invalid={(nameTouched || submitAttempted) && !mainNameCheck.valid}
+                    className={`w-full rounded-lg border px-3.5 py-2.5 text-sm text-[#1E1A16] transition-colors focus:outline-none ${
+                      (nameTouched || submitAttempted) && !mainNameCheck.valid
+                        ? 'border-red-500 bg-red-50/40 focus:border-red-600'
+                        : nameTouched && mainNameCheck.valid
+                          ? 'border-emerald-600 bg-emerald-50/20 focus:border-emerald-700'
+                          : 'border-[#D4CBBF] bg-white focus:border-[#9A5B25]'
+                    }`}
+                  />
+                  {(nameTouched || submitAttempted) && !mainNameCheck.valid && (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-red-700">
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{mainNameCheck.message}</span>
+                    </p>
+                  )}
+                  {nameTouched && mainNameCheck.valid && (
+                    <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                      <span>الاسم الثلاثي صحيح</span>
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="phone"
+                    className="mb-1.5 block text-sm font-semibold text-[#1E1A16]"
+                  >
+                    رقم الهاتف المصري (واتساب) <span className="text-red-600">*</span>
+                  </label>
+                  <div
+                    dir="ltr"
+                    className={`flex items-stretch overflow-hidden rounded-lg border transition-colors ${
+                      (phoneTouched || submitAttempted) && !mainPhoneCheck.valid
+                        ? 'border-red-500 bg-red-50/40 focus-within:border-red-600'
+                        : phoneTouched && mainPhoneCheck.valid
+                          ? 'border-emerald-600 bg-emerald-50/20 focus-within:border-emerald-700'
+                          : 'border-[#D4CBBF] bg-white focus-within:border-[#9A5B25]'
+                    }`}
+                  >
+                    <span className="flex select-none items-center border-r border-[#E4DDD2] bg-[#F5F1E9] px-3 font-mono-num text-sm font-bold text-[#1E1A16]">
+                      +20
+                    </span>
+                    <input
+                      id="phone"
+                      type="tel"
+                      inputMode="numeric"
+                      value={phoneDigits}
+                      onChange={(e) => {
+                        const cleaned = normalizeDigits(e.target.value);
+                        setPhoneDigits(cleaned);
+                        if (!phoneTouched) setPhoneTouched(true);
+                      }}
+                      onBlur={() => setPhoneTouched(true)}
+                      placeholder="10xxxxxxxx"
+                      aria-invalid={(phoneTouched || submitAttempted) && !mainPhoneCheck.valid}
+                      className="w-full bg-transparent px-3.5 py-2.5 font-mono-num text-sm text-[#1E1A16] focus:outline-none"
+                    />
+                  </div>
+                  <div className="mt-1.5 flex items-start justify-between gap-2">
+                    <div className="flex-1">
+                      {(phoneTouched || submitAttempted) && !mainPhoneCheck.valid ? (
+                        <p className="flex items-start gap-1.5 text-xs font-medium text-red-700">
+                          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <span>{mainPhoneCheck.message}</span>
+                        </p>
+                      ) : phoneTouched && mainPhoneCheck.valid ? (
+                        <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                          <span>
+                            رقم مصري صحيح (
+                            <span className="font-mono-num" dir="ltr">
+                              +20{phoneDigits}
+                            </span>
+                            )
+                          </span>
+                        </p>
+                      ) : (
+                        <p className="text-xs text-[#7B7165]">
+                          أدخل 10 أرقام بعد +20 بدون الصفر الأول (مثال: 1012345678)
+                        </p>
+                      )}
+                    </div>
+                    <span className="font-mono-num text-xs text-[#6B6155] shrink-0">
+                      {phoneDigits.length}/10
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 2: Registration Type & Companions */}
+            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+              <h3 className="font-display text-lg font-bold text-[#1E1A16]">2. نوع التسجيل</h3>
+
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setRegType('self')}
+                  aria-pressed={regType === 'self'}
+                  className={`flex items-center gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors cursor-pointer ${
+                    regType === 'self'
+                      ? 'border-[#9A5B25] bg-[#FAF4EC] text-[#1E1A16]'
+                      : 'border-[#E4DDD2] bg-white text-[#5C5349] hover:border-[#C8BCAE]'
+                  }`}
+                >
+                  <UserPlus
+                    className={`h-5 w-5 shrink-0 ${
+                      regType === 'self' ? 'text-[#9A5B25]' : 'text-[#8C8173]'
+                    }`}
+                  />
+                  <div>
+                    <p className="text-sm font-bold text-[#1E1A16]">تسجيل فردي (لنفسي فقط)</p>
+                    <p className="text-xs text-[#6B6155]">فرد واحد · 250 جنيه</p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setRegType('group')}
+                  aria-pressed={regType === 'group'}
+                  className={`flex items-center gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors cursor-pointer ${
+                    regType === 'group'
+                      ? 'border-[#9A5B25] bg-[#FAF4EC] text-[#1E1A16]'
+                      : 'border-[#E4DDD2] bg-white text-[#5C5349] hover:border-[#C8BCAE]'
+                  }`}
+                >
+                  <Users
+                    className={`h-5 w-5 shrink-0 ${
+                      regType === 'group' ? 'text-[#9A5B25]' : 'text-[#8C8173]'
+                    }`}
+                  />
+                  <div>
+                    <p className="text-sm font-bold text-[#1E1A16]">تسجيل لمجموعة</p>
+                    <p className="text-xs text-[#6B6155]">
+                      أنت + إضافة أي عدد من المرافقين في نفس الباص ونفس القروب
+                    </p>
+                  </div>
+                </button>
+              </div>
+
+              {regType === 'group' && (
+                <div className="mt-5 rounded-lg border border-[#E4DDD2] bg-[#FAF8F4] p-5">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h4 className="font-display text-base font-bold text-[#1E1A16]">
+                        بيانات المرافقين
+                      </h4>
+                      <p className="text-xs text-[#6B6155]">
+                        أضف كل شخص مرافق معك بالضغط على «إضافة شخص جديد» — سيتم تسجيل الجميع معاً في
+                        نفس الباص ونفس قروب الألوان.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 rounded-lg border border-[#E4DDD2] bg-white px-3.5 py-2 text-xs font-semibold text-[#4E463D] shrink-0">
+                      <span>عدد المرافقين:</span>
+                      <strong className="font-mono-num text-sm font-extrabold text-[#9A5B25]">
+                        {companions.length}
+                      </strong>
+                      <span className="text-[#9E9386]">·</span>
+                      <span>
+                        الإجمالي:{' '}
+                        <strong className="font-mono-num text-sm text-[#1E1A16]">
+                          {totalPersons}
+                        </strong>{' '}
+                        أفراد
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 divide-y divide-[#E4DDD2]">
+                    {companions.map((comp, idx) => {
+                      const cNameCheck = validateTripleName(comp.name);
+                      const cPhoneCheck = validateEgyptianPhone(comp.phone);
+                      const showNameErr = (comp.nameTouched || submitAttempted) && !cNameCheck.valid;
+                      const showPhoneErr =
+                        (comp.phoneTouched || submitAttempted) && !cPhoneCheck.valid;
+
+                      return (
+                        <div key={comp.keyId} className={idx === 0 ? 'pb-5' : 'py-5'}>
+                          <div className="mb-3 flex items-center justify-between gap-2">
+                            <p className="text-sm font-bold text-[#7C4518]">
+                              المرافق {idx + 1}
+                            </p>
+                            {companions.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => removeCompanion(comp.keyId)}
+                                className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 transition-colors hover:bg-red-50 cursor-pointer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                <span>حذف الشخص</span>
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <div>
+                              <label className="mb-1.5 block text-xs font-semibold text-[#1E1A16]">
+                                الاسم الثلاثي فقط <span className="text-red-600">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                value={comp.name}
+                                onChange={(e) =>
+                                  updateCompanion(comp.keyId, {
+                                    name: e.target.value,
+                                    nameTouched: true,
+                                  })
+                                }
+                                onBlur={() => updateCompanion(comp.keyId, { nameTouched: true })}
+                                placeholder="مثال: بيشوي مجدي حنا"
+                                className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-[#1E1A16] focus:outline-none ${
+                                  showNameErr
+                                    ? 'border-red-500'
+                                    : comp.nameTouched && cNameCheck.valid
+                                      ? 'border-emerald-600'
+                                      : 'border-[#D4CBBF] focus:border-[#9A5B25]'
+                                }`}
+                              />
+                              {showNameErr && (
+                                <p className="mt-1 text-xs font-medium text-red-700">
+                                  {cNameCheck.message}
+                                </p>
+                              )}
+                            </div>
+
+                            <div>
+                              <label className="mb-1.5 block text-xs font-semibold text-[#1E1A16]">
+                                رقم الهاتف المصري <span className="text-red-600">*</span>
+                              </label>
+                              <div
+                                dir="ltr"
+                                className={`flex items-stretch overflow-hidden rounded-lg border bg-white ${
+                                  showPhoneErr
+                                    ? 'border-red-500'
+                                    : comp.phoneTouched && cPhoneCheck.valid
+                                      ? 'border-emerald-600'
+                                      : 'border-[#D4CBBF] focus-within:border-[#9A5B25]'
+                                }`}
+                              >
+                                <span className="flex select-none items-center border-r border-[#E4DDD2] bg-[#F5F1E9] px-2.5 font-mono-num text-xs font-bold text-[#1E1A16]">
+                                  +20
+                                </span>
+                                <input
+                                  type="tel"
+                                  inputMode="numeric"
+                                  value={comp.phone}
+                                  onChange={(e) =>
+                                    updateCompanion(comp.keyId, {
+                                      phone: normalizeDigits(e.target.value),
+                                      phoneTouched: true,
+                                    })
+                                  }
+                                  onBlur={() => updateCompanion(comp.keyId, { phoneTouched: true })}
+                                  placeholder="10xxxxxxxx"
+                                  className="w-full bg-transparent px-3 py-2 font-mono-num text-sm text-[#1E1A16] focus:outline-none"
+                                />
+                              </div>
+                              <div className="mt-1 flex items-start justify-between gap-2">
+                                <div className="flex-1">
+                                  {showPhoneErr ? (
+                                    <p className="text-xs font-medium text-red-700">
+                                      {cPhoneCheck.message}
+                                    </p>
+                                  ) : comp.phoneTouched && cPhoneCheck.valid ? (
+                                    <p className="text-xs font-medium text-emerald-700">
+                                      رقم مصري صحيح
+                                    </p>
+                                  ) : null}
+                                </div>
+                                <span className="font-mono-num text-[11px] text-[#6B6155]">
+                                  {comp.phone.length}/10
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-5 border-t border-[#E4DDD2] pt-4">
+                    <button
+                      type="button"
+                      onClick={addCompanion}
+                      className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-[#9A5B25]/50 bg-white px-4 py-2.5 text-sm font-bold text-[#7C4518] transition-colors hover:border-[#9A5B25] hover:bg-[#FAF4EC] cursor-pointer"
+                    >
+                      <Plus className="h-4 w-4" />
+                      <span>إضافة شخص جديد</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Section 3: Single Bus Selection */}
+            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                  3. اختيار الباص <span className="text-red-600">*</span>
+                </h3>
+                <span className="text-xs text-[#6B6155]">اختر باصاً واحداً فقط</span>
+              </div>
+
+              <div
+                className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2"
+                role="radiogroup"
+                aria-label="اختيار الباص"
+              >
+                {BUS_LIST.map((bus) => {
+                  const stat = capacities.buses[bus.key];
+                  const isSelected = busChoice === bus.key;
+
+                  return (
+                    <button
+                      key={bus.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      aria-disabled={stat.isFull}
+                      onClick={() => handleSelectBus(bus.key)}
+                      className={`flex items-center justify-between gap-3 rounded-lg border p-4 text-right transition-colors ${
+                        stat.isFull
+                          ? 'border-red-200 bg-red-50/50 text-[#7A6F64] cursor-not-allowed'
+                          : isSelected
+                            ? 'border-[#9A5B25] bg-[#FAF4EC] cursor-pointer'
+                            : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE] cursor-pointer'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 font-display text-base font-bold text-[#1E1A16]">
+                        <span
+                          className={`flex h-4 w-4 items-center justify-center rounded-full border ${
+                            stat.isFull
+                              ? 'border-red-300 bg-red-100'
+                              : isSelected
+                                ? 'border-[#9A5B25] bg-[#9A5B25]'
+                                : 'border-[#B9AFA2]'
+                          }`}
+                        >
+                          {isSelected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                        </span>
+                        <span>{bus.label}</span>
+                      </span>
+
+                      {stat.isFull ? (
+                        <span className="text-xs font-extrabold text-red-700">البص اتملا</span>
+                      ) : (
+                        <span className="text-xs font-semibold text-emerald-700">متاح</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {busClickedFull && (
+                <p className="mt-2.5 flex items-center gap-1.5 text-sm font-bold text-red-700">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{busClickedFull}</span>
+                </p>
+              )}
+
+              {selectedBusInsufficient && busChoice && (
+                <p className="mt-2.5 flex items-start gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-bold text-red-800">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>
+                    لا يمكن التسجيل بهذا العدد في {LABELS.buses[busChoice]} — العدد المتاح لا يكفي
+                    لعدد الأفراد ({totalPersons}). يمكنك تقليل عدد المرافقين بالأعلى أو اختيار الباص
+                    الآخر.
+                  </span>
+                </p>
+              )}
+            </div>
+
+            {/* Section 4: Single Color Group Selection */}
+            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                  4. تحديد المجموعة اللونية <span className="text-red-600">*</span>
+                </h3>
+                <span className="text-xs text-[#6B6155]">اختر لوناً واحداً فقط</span>
+              </div>
+
+              <div
+                className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2"
+                role="radiogroup"
+                aria-label="تحديد المجموعة اللونية"
+              >
+                {COLOR_GROUP_LIST.map((group) => {
+                  const stat = capacities.colors[group.key];
+                  const isSelected = colorGroup === group.key;
+
+                  return (
+                    <button
+                      key={group.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      aria-disabled={stat.isFull}
+                      onClick={() => handleSelectColor(group.key)}
+                      className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors ${
+                        stat.isFull
+                          ? 'border-red-200 bg-red-50/50 cursor-not-allowed'
+                          : isSelected
+                            ? `${group.borderClass} ${group.softBgClass} cursor-pointer`
+                            : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE] cursor-pointer'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={`h-4 w-4 shrink-0 rounded-sm ${group.swatchClass} ${
+                            stat.isFull ? 'opacity-50' : ''
+                          }`}
+                          aria-hidden="true"
+                        />
+                        <p className="font-display text-sm font-bold text-[#1E1A16]">
+                          قروب {group.label}
+                        </p>
+                      </div>
+
+                      {stat.isFull ? (
+                        <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
+                          القروب اكتمل
+                        </span>
+                      ) : (
+                        <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
+                          متاح
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {colorClickedFull && (
+                <p className="mt-2.5 flex items-center gap-1.5 text-sm font-bold text-red-700">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{colorClickedFull}</span>
+                </p>
+              )}
+
+              {selectedColorInsufficient && colorGroup && (
+                <p className="mt-2.5 flex items-start gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-bold text-red-800">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>
+                    لا يمكن التسجيل بهذا العدد في قروب {LABELS.colors[colorGroup]} — العدد المتاح لا
+                    يكفي لعدد الأفراد ({totalPersons}). يمكنك تقليل عدد المرافقين بالأعلى أو اختيار
+                    قروب لوني آخر.
+                  </span>
+                </p>
+              )}
+            </div>
+
+            {/* Section 5: Payment Method with Icons & Automatic Organizer Assignment */}
+            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                  5. اختيار طريقة الدفع <span className="text-red-600">*</span>
+                </h3>
+                <span className="text-xs text-[#6B6155]">
+                  يظهر المسؤول ورقم التحويل تلقائياً حسب وسيلة الدفع المختارة
+                </span>
+              </div>
+
+              <div
+                className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3"
+                role="radiogroup"
+                aria-label="طريقة الدفع"
+              >
+                {PAYMENT_METHOD_LIST.map((pm) => {
+                  const isSelected = paymentMethod === pm.key;
+                  const pmRecipient = LABELS.recipients[PAYMENT_RECIPIENT_MAP[pm.key]];
+
+                  return (
+                    <button
+                      key={pm.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => setPaymentMethod(pm.key)}
+                      className={`flex items-center gap-3 rounded-xl border p-3.5 text-right transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'border-[#9A5B25] bg-[#FAF4EC]'
+                          : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE]'
+                      }`}
+                    >
+                      <PaymentMethodIcon method={pm.key} className="h-11 w-11 shrink-0" />
+                      <div className="min-w-0">
+                        <p className="font-display text-sm font-bold text-[#1E1A16]">{pm.label}</p>
+                        <p className="text-[11px] text-[#6B6155]">{pm.enLabel}</p>
+                        <p className="mt-0.5 truncate text-[11px] font-semibold text-[#7C4518]">
+                          {pmRecipient}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {paymentMethod && assignedRecipient && (
+                <div className="mt-4 flex flex-col gap-3 rounded-xl border border-[#DFD4C4] bg-[#FAF8F4] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-3">
+                    <PaymentMethodIcon method={paymentMethod} className="h-9 w-9 shrink-0" />
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs text-[#6B6155]">
+                        <UserCheck className="h-3.5 w-3.5 text-[#9A5B25]" />
+                        <span>المسؤول عن استلام الاشتراك</span>
+                      </p>
+                      <p className="font-display text-base font-bold text-[#1E1A16]">
+                        {LABELS.recipients[assignedRecipient]}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 rounded-lg border border-[#E4DDD2] bg-white px-3.5 py-2">
+                    <Phone className="h-4 w-4 text-emerald-700 shrink-0" />
+                    <span className="font-mono-num text-sm font-bold text-[#1E1A16]" dir="ltr">
+                      {assignedWhatsAppDisplay}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Price Summary & Submit */}
+            <div className="mt-8 border-t border-[#ECE6DC] pt-6">
+              {formError && (
+                <div
+                  role="alert"
+                  className="mb-4 flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
+              <div className="flex flex-col items-stretch justify-between gap-4 rounded-xl border border-[#E4DDD2] bg-[#FAF8F4] px-5 py-4 sm:flex-row sm:items-center">
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+                  <span className="text-[#5C5349]">
+                    عدد الأفراد:{' '}
+                    <strong className="font-mono-num text-base text-[#1E1A16]">
+                      {totalPersons}
+                    </strong>
+                  </span>
+                  <span className="text-[#5C5349]">
+                    الإجمالي المطلوب:{' '}
+                    <strong className="font-mono-num text-lg font-extrabold text-[#9A5B25]">
+                      {totalPrice} جنيه
+                    </strong>
+                  </span>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="inline-flex min-h-[46px] items-center justify-center rounded-lg bg-[#9A5B25] px-7 py-3 text-sm font-bold text-white transition-colors hover:bg-[#7C4518] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9A5B25] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                >
+                  {isSubmitting ? 'جارٍ حفظ التسجيل...' : 'تأكيد التسجيل والتحويل للواتساب'}
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  );
+}
