@@ -1,7 +1,16 @@
-import { useMemo, useState } from 'react';
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   Check,
+  ChevronDown,
   Copy,
   Database,
   Download,
@@ -10,16 +19,11 @@ import {
   LogOut,
   Phone,
   RefreshCw,
-  RotateCcw,
   Search,
   Settings2,
   X,
 } from 'lucide-react';
 import {
-  BUS_CAPACITY,
-  BUS_LIST,
-  COLOR_GROUP_CAPACITY,
-  COLOR_GROUP_LIST,
   LABELS,
   PAYMENT_METHOD_LIST,
   RECIPIENT_LIST,
@@ -33,14 +37,23 @@ import {
   calculateFinancialStats,
   exportRegistrationsToCSV,
   exportRegistrationsToExcel,
+  getDuplicateNameCounts,
   getRegSummary,
+  hasDuplicateMemberName,
   matchesRegistrationSearch,
   normalizeDigits,
   type CapacityCounts,
 } from '../utils/validation';
 import { isValidGoogleScriptUrl } from '../config/sheets';
 import { saveAdminPin } from './AdminAuthGate';
-import { PaymentMethodIcon } from './PaymentMethodIcon';
+import {
+  AdminCapacityBoard,
+  AdminFinancialCards,
+  RegistrationTableRow,
+} from './AdminMemoComponents';
+import { AdminStressTestPanel } from './AdminStressTestPanel';
+
+const LAZY_PAGE_SIZE = 20;
 
 interface AdminPanelViewProps {
   currentOrganizer: RecipientKey;
@@ -49,13 +62,21 @@ interface AdminPanelViewProps {
   whatsappNumbers: WhatsAppConfig;
   googleScriptUrl: string;
   isSyncingSheets: boolean;
+  pendingSavesCount: number;
+  cloudNotice: string;
+  onDismissCloudNotice: () => void;
   onSyncSheets: () => Promise<string | null>;
+  onReplaceRegistrations: (next: RegistrationRecord[]) => void;
+  onClearLocalTestRecords: () => void;
+  onAppendLocalTestRecords: (records: RegistrationRecord[]) => void;
   onUpdateGoogleScriptUrl: (nextUrl: string) => Promise<string | null>;
   onUpdateWhatsAppNumbers: (next: WhatsAppConfig) => void;
-  onToggleMemberPaid: (regId: number, memberId: string) => Promise<string | null>;
-  onToggleMemberCancelled: (regId: number, memberId: string) => Promise<string | null>;
-  onApproveAllInReg: (regId: number) => Promise<string | null>;
-  onCancelAllInReg: (regId: number) => Promise<string | null>;
+  onToggleMemberPaid: (regId: number, memberId: string) => string | null;
+  onToggleMemberCancelled: (regId: number, memberId: string) => string | null;
+  onApproveAllInReg: (regId: number) => string | null;
+  onCancelAllInReg: (regId: number) => string | null;
+  onDeleteMember: (regId: number, memberId: string) => string | null;
+  onDeleteRegistration: (regId: number) => string | null;
   onGoToRegister: () => void;
   onLogout: () => void;
 }
@@ -67,22 +88,36 @@ export function AdminPanelView({
   whatsappNumbers,
   googleScriptUrl,
   isSyncingSheets,
+  pendingSavesCount,
+  cloudNotice,
+  onDismissCloudNotice,
   onSyncSheets,
+  onReplaceRegistrations,
+  onClearLocalTestRecords,
+  onAppendLocalTestRecords,
   onUpdateGoogleScriptUrl,
   onUpdateWhatsAppNumbers,
   onToggleMemberPaid,
   onToggleMemberCancelled,
   onApproveAllInReg,
   onCancelAllInReg,
+  onDeleteMember,
+  onDeleteRegistration,
   onGoToRegister,
   onLogout,
 }: AdminPanelViewProps) {
   const [filterRecipient, setFilterRecipient] = useState<'all' | RecipientKey>('all');
   const [filterPayment, setFilterPayment] = useState<'all' | PaymentMethodKey>('all');
   const [filterStatus, setFilterStatus] = useState<'all' | BookingStatusKey>('all');
+  const [onlyDuplicates, setOnlyDuplicates] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+
+  const [visibleCount, setVisibleCount] = useState<number>(LAZY_PAGE_SIZE);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+
   const [adminNotice, setAdminNotice] = useState<string>('');
-  const [busyActionId, setBusyActionId] = useState<string | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [waDraft, setWaDraft] = useState<WhatsAppConfig>(whatsappNumbers);
@@ -111,36 +146,150 @@ export function AdminPanelView({
     [registrations]
   );
 
+  const testRowsCount = useMemo(
+    () => registrations.filter((r) => Boolean(r.isTest)).length,
+    [registrations]
+  );
+
+  const duplicateNameCounts = useMemo(
+    () => getDuplicateNameCounts(registrations),
+    [registrations]
+  );
+
+  const duplicateStats = useMemo(() => {
+    let uniqueDuplicateNames = 0;
+    let totalDuplicateOccurrences = 0;
+    duplicateNameCounts.forEach((count) => {
+      if (count > 1) {
+        uniqueDuplicateNames++;
+        totalDuplicateOccurrences += count;
+      }
+    });
+    const duplicateBookingsCount =
+      uniqueDuplicateNames === 0
+        ? 0
+        : registrations.filter((reg) => hasDuplicateMemberName(reg, duplicateNameCounts)).length;
+    return {
+      uniqueDuplicateNames,
+      totalDuplicateOccurrences,
+      duplicateBookingsCount,
+    };
+  }, [registrations, duplicateNameCounts]);
+
+  // Turn off duplicates-only filter automatically once all duplicates have been cleaned up
+  useEffect(() => {
+    if (onlyDuplicates && duplicateStats.uniqueDuplicateNames === 0) {
+      setOnlyDuplicates(false);
+    }
+  }, [onlyDuplicates, duplicateStats.uniqueDuplicateNames]);
+
   const filteredRegistrations = useMemo(() => {
     return registrations.filter((reg) => {
       const matchRec = filterRecipient === 'all' || reg.recipient === filterRecipient;
       const matchPay = filterPayment === 'all' || reg.paymentMethod === filterPayment;
       const summary = getRegSummary(reg);
       const matchStatus = filterStatus === 'all' || summary.statusKey === filterStatus;
-      const matchSearch = matchesRegistrationSearch(reg, searchQuery);
-      return matchRec && matchPay && matchStatus && matchSearch;
+      const matchDup = !onlyDuplicates || hasDuplicateMemberName(reg, duplicateNameCounts);
+      const matchSearch = matchesRegistrationSearch(reg, deferredSearchQuery);
+      return matchRec && matchPay && matchStatus && matchDup && matchSearch;
     });
-  }, [registrations, filterRecipient, filterPayment, filterStatus, searchQuery]);
+  }, [
+    registrations,
+    filterRecipient,
+    filterPayment,
+    filterStatus,
+    onlyDuplicates,
+    duplicateNameCounts,
+    deferredSearchQuery,
+  ]);
 
   const filteredMembersCount = useMemo(
     () => filteredRegistrations.reduce((sum, reg) => sum + reg.members.length, 0),
     [filteredRegistrations]
   );
 
-  const runAsyncAction = async (key: string, fn: () => Promise<string | null>) => {
-    if (busyActionId) return;
-    setBusyActionId(key);
+  // Reset lazy-loading window whenever search or filters change
+  useEffect(() => {
+    setVisibleCount(LAZY_PAGE_SIZE);
+  }, [deferredSearchQuery, filterRecipient, filterPayment, filterStatus, onlyDuplicates]);
+
+  const visibleRegistrations = useMemo(
+    () => filteredRegistrations.slice(0, visibleCount),
+    [filteredRegistrations, visibleCount]
+  );
+
+  const remainingToLoad = Math.max(0, filteredRegistrations.length - visibleRegistrations.length);
+
+  // Automatic lazy loading on scroll via IntersectionObserver
+  useEffect(() => {
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel || remainingToLoad <= 0) return;
+
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleCount((prev) => Math.min(filteredRegistrations.length, prev + LAZY_PAGE_SIZE));
+        }
+      },
+      { rootMargin: '260px' }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [remainingToLoad, filteredRegistrations.length]);
+
+  const runInstantAction = useCallback((fn: () => string | null) => {
     setAdminNotice('');
-    try {
-      const err = await fn();
-      if (err) setAdminNotice(err);
-    } finally {
-      setBusyActionId(null);
-    }
-  };
+    const err = fn();
+    if (err) setAdminNotice(err);
+  }, []);
+
+  const handleTogglePaidCb = useCallback(
+    (regId: number, memberId: string) =>
+      runInstantAction(() => onToggleMemberPaid(regId, memberId)),
+    [runInstantAction, onToggleMemberPaid]
+  );
+
+  const handleToggleCancelledCb = useCallback(
+    (regId: number, memberId: string) =>
+      runInstantAction(() => onToggleMemberCancelled(regId, memberId)),
+    [runInstantAction, onToggleMemberCancelled]
+  );
+
+  const handleApproveAllCb = useCallback(
+    (regId: number) => runInstantAction(() => onApproveAllInReg(regId)),
+    [runInstantAction, onApproveAllInReg]
+  );
+
+  const handleCancelAllCb = useCallback(
+    (regId: number) => runInstantAction(() => onCancelAllInReg(regId)),
+    [runInstantAction, onCancelAllInReg]
+  );
+
+  const handleDeleteMemberCb = useCallback(
+    (regId: number, memberId: string) =>
+      runInstantAction(() => onDeleteMember(regId, memberId)),
+    [runInstantAction, onDeleteMember]
+  );
+
+  const handleDeleteRegCb = useCallback(
+    (regId: number) => runInstantAction(() => onDeleteRegistration(regId)),
+    [runInstantAction, onDeleteRegistration]
+  );
+
+  const handleQuickFilterName = useCallback((name: string) => {
+    setSearchQuery(name);
+    setFilterRecipient('all');
+    setFilterPayment('all');
+    setFilterStatus('all');
+    setOnlyDuplicates(false);
+  }, []);
 
   const handleRefresh = async () => {
     setAdminNotice('');
+    onDismissCloudNotice();
     const err = await onSyncSheets();
     if (err) setAdminNotice(err);
   };
@@ -198,13 +347,8 @@ export function AdminPanelView({
     searchQuery.trim() !== '' ||
     filterRecipient !== 'all' ||
     filterPayment !== 'all' ||
-    filterStatus !== 'all';
-
-  const summaryCards = [
-    { key: 'mekhail', title: 'ميخائيل إدور', stats: mekhailStats },
-    { key: 'fayez', title: 'فايز فيكتور', stats: fayezStats },
-    { key: 'overall', title: 'الإجمالي العام للرحلة', stats: overallStats },
-  ];
+    filterStatus !== 'all' ||
+    onlyDuplicates;
 
   return (
     <div className="space-y-8 pb-16 pt-6 md:pt-10">
@@ -228,8 +372,18 @@ export function AdminPanelView({
               onClick={handleRefresh}
               className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-[#D4CBBF] bg-white px-3.5 py-2 text-xs font-semibold text-[#1E1A16] transition-colors hover:bg-[#F5F1E9] disabled:opacity-60 whitespace-nowrap cursor-pointer"
             >
-              <RefreshCw className={`h-4 w-4 text-[#7C4518] ${isSyncingSheets ? 'animate-spin' : ''}`} />
-              <span>{isSyncingSheets ? 'جارٍ التحديث...' : 'تحديث البيانات'}</span>
+              <RefreshCw
+                className={`h-4 w-4 text-[#7C4518] ${
+                  isSyncingSheets || pendingSavesCount > 0 ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {isSyncingSheets
+                  ? 'جارٍ التحديث...'
+                  : pendingSavesCount > 0
+                    ? 'جارٍ الحفظ...'
+                    : 'تحديث البيانات'}
+              </span>
             </button>
           )}
 
@@ -291,6 +445,15 @@ export function AdminPanelView({
         </div>
       </div>
 
+      {/* Dedicated Stress Test & Sheet Cleanup Section (Admin Only) */}
+      <AdminStressTestPanel
+        googleScriptUrl={googleScriptUrl}
+        testRowsCount={testRowsCount}
+        onReplaceRegistrations={onReplaceRegistrations}
+        onClearLocalTestRecords={onClearLocalTestRecords}
+        onAppendLocalTestRecords={onAppendLocalTestRecords}
+      />
+
       {/* Organizer Settings (Google Sheets URL + WhatsApp Numbers + Secret PIN) */}
       {showSettings && (
         <div className="space-y-6 rounded-xl border border-[#E4DDD2] bg-white p-5">
@@ -311,7 +474,6 @@ export function AdminPanelView({
             </button>
           </div>
 
-          {/* Google Sheets Apps Script URL */}
           <div className="rounded-lg border border-[#ECE6DC] bg-[#FAF8F4] p-4">
             <label
               htmlFor="scriptUrlInput"
@@ -353,7 +515,6 @@ export function AdminPanelView({
             )}
           </div>
 
-          {/* WhatsApp Numbers */}
           <div className="border-t border-[#ECE6DC] pt-5">
             <div className="mb-3 flex items-center gap-2">
               <Phone className="h-4 w-4 text-[#9A5B25]" />
@@ -404,7 +565,6 @@ export function AdminPanelView({
             </div>
           </div>
 
-          {/* Change Admin PIN */}
           <div className="border-t border-[#ECE6DC] pt-5">
             <div className="flex items-center gap-2">
               <KeyRound className="h-4 w-4 text-[#9A5B25]" />
@@ -436,18 +596,21 @@ export function AdminPanelView({
       )}
 
       {/* Admin Capacity / Error Notice */}
-      {adminNotice && (
+      {(adminNotice || cloudNotice) && (
         <div
           role="alert"
           className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
         >
           <div className="flex items-center gap-2">
             <AlertCircle className="h-4 w-4 shrink-0" />
-            <span>{adminNotice}</span>
+            <span>{adminNotice || cloudNotice}</span>
           </div>
           <button
             type="button"
-            onClick={() => setAdminNotice('')}
+            onClick={() => {
+              setAdminNotice('');
+              onDismissCloudNotice();
+            }}
             className="rounded p-1 text-red-700 hover:bg-red-100 cursor-pointer"
             aria-label="إخفاء التنبيه"
           >
@@ -456,160 +619,78 @@ export function AdminPanelView({
         </div>
       )}
 
-      {/* Financial Summary Cards */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        {summaryCards.map(({ key, title, stats }) => (
-          <div key={key} className="rounded-xl border border-[#E4DDD2] bg-white p-5">
-            <h2 className="font-display text-lg font-bold text-[#1E1A16]">{title}</h2>
+      {/* Memoized Financial Summary Cards */}
+      <AdminFinancialCards
+        mekhailStats={mekhailStats}
+        fayezStats={fayezStats}
+        overallStats={overallStats}
+      />
 
-            <div className="mt-4 space-y-2 text-sm tabular-nums">
-              <div className="flex items-center justify-between">
-                <span className="text-[#5C5349]">إجمالي المطلوب (النشطين)</span>
-                <strong className="font-mono-num text-[#1E1A16]">
-                  {stats.expectedMoney} ج ({stats.activePersons} فرد)
-                </strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#5C5349]">تم الدفع (Approve)</span>
-                <strong className="font-mono-num text-emerald-700">
-                  {stats.paidMoney} ج ({stats.paidPersons} فرد)
-                </strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#5C5349]">المتبقي (لم يدفع)</span>
-                <strong className="font-mono-num text-amber-700">
-                  {stats.remainingMoney} ج ({stats.activePersons - stats.paidPersons} فرد)
-                </strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#5C5349]">أفراد ملغيين</span>
-                <strong className="font-mono-num text-red-700">
-                  {stats.cancelledPersons} فرد
-                </strong>
-              </div>
-            </div>
+      {/* Memoized Live Confirmed Capacity Board */}
+      <AdminCapacityBoard capacities={capacities} />
 
-            <div className="mt-4 border-t border-dashed border-[#DFD7CA] pt-3.5 text-xs tabular-nums">
-              <p className="mb-2 font-semibold text-[#4E463D]">حسب طريقة الدفع (مدفوع / مطلوب)</p>
-              <div className="space-y-1.5 text-[#5C5349]">
-                {PAYMENT_METHOD_LIST.map((pm) => {
-                  const pStat = stats.byPayment[pm.key];
-                  return (
-                    <div key={pm.key} className="flex items-center justify-between">
-                      <span>{pm.label}</span>
-                      <span className="font-mono-num text-[#1E1A16]">
-                        {pStat.paid} / {pStat.expected} ج ({pStat.persons} فرد)
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+      {/* Duplicate Names Alert Banner (only shown when duplicates exist) */}
+      {duplicateStats.uniqueDuplicateNames > 0 && (
+        <div
+          role="alert"
+          className="flex flex-col gap-3 rounded-xl border-2 border-red-400 bg-red-50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-700" />
+            <div>
+              <p className="font-display text-sm font-extrabold text-red-900">
+                تنبيه: تم اكتشاف {duplicateStats.uniqueDuplicateNames}{' '}
+                {duplicateStats.uniqueDuplicateNames === 1 ? 'اسم مكرر' : 'أسماء مكررة'} في قائمة
+                المسجلين (إجمالي {duplicateStats.totalDuplicateOccurrences} سجل مكرر)
+              </p>
+              <p className="mt-0.5 text-xs text-red-800">
+                تم تمييز كل الأسماء المكررة باللون الأحمر في الجدول أدناه. اضغط على شارة «اسم مكرر»
+                بجانب أي اسم لمقارنة التكرارات، أو اضغط الزر لعرض الأسماء المكررة فقط وحذف الزائد.
+              </p>
             </div>
           </div>
-        ))}
-      </div>
 
-      {/* Live Confirmed Capacity Board (Visible ONLY inside Organizer Panel) */}
-      <div className="rounded-xl border border-[#E4DDD2] bg-white p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="font-display text-base font-bold text-[#1E1A16]">
-            حالة المقاعد والقروبات (المؤكدين بالدفع فقط)
-          </h2>
-          <span className="text-xs text-[#6B6155]">
-            سعة كل باص {BUS_CAPACITY} فرد · سعة كل قروب لوني {COLOR_GROUP_CAPACITY} فرد
-          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !onlyDuplicates;
+              setOnlyDuplicates(next);
+              if (next) {
+                setSearchQuery('');
+                setFilterRecipient('all');
+                setFilterPayment('all');
+                setFilterStatus('all');
+              }
+            }}
+            className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-xs font-extrabold transition-colors whitespace-nowrap cursor-pointer ${
+              onlyDuplicates
+                ? 'border border-red-400 bg-white text-red-800 hover:bg-red-100'
+                : 'bg-red-700 text-white hover:bg-red-800'
+            }`}
+          >
+            <AlertTriangle className="h-3.5 w-3.5" />
+            <span>
+              {onlyDuplicates
+                ? 'عرض جميع المسجلين'
+                : `عرض الأسماء المكررة فقط (${duplicateStats.duplicateBookingsCount})`}
+            </span>
+          </button>
         </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-          {BUS_LIST.map((bus) => {
-            const stat = capacities.buses[bus.key];
-            return (
-              <div
-                key={bus.key}
-                className="rounded-lg border border-[#ECE6DC] bg-[#FAF8F4] p-4"
-              >
-                <div className="flex items-center justify-between text-sm">
-                  <strong className="text-[#1E1A16]">{bus.label}</strong>
-                  <span
-                    className={`font-mono-num text-xs font-bold ${
-                      stat.isFull ? 'text-red-700' : 'text-emerald-700'
-                    }`}
-                  >
-                    {stat.isFull
-                      ? `البص اتملا (${stat.confirmed}/${BUS_CAPACITY})`
-                      : `${stat.confirmed} / ${BUS_CAPACITY} مؤكد · متبقي ${stat.remaining}`}
-                  </span>
-                </div>
-                <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-[#E6DFD3]">
-                  <div
-                    className={`h-full transition-all duration-300 ${
-                      stat.isFull ? 'bg-red-600' : 'bg-[#9A5B25]'
-                    }`}
-                    style={{ width: `${Math.min(100, (stat.confirmed / BUS_CAPACITY) * 100)}%` }}
-                  />
-                </div>
-                <p className="mt-2 text-xs text-[#6B6155] tabular-nums">
-                  بانتظار تأكيد الدفع:{' '}
-                  <strong className="font-mono-num text-[#1E1A16]">{stat.pending} فرد</strong>
-                </p>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {COLOR_GROUP_LIST.map((group) => {
-            const stat = capacities.colors[group.key];
-            return (
-              <div
-                key={group.key}
-                className="rounded-lg border border-[#ECE6DC] bg-[#FAF8F4] p-3.5"
-              >
-                <div className="flex items-center justify-between gap-1.5 text-xs">
-                  <span className="flex items-center gap-1.5 font-bold text-[#1E1A16]">
-                    <span className={`h-2.5 w-2.5 rounded-xs ${group.swatchClass}`} />
-                    <span>قروب {group.label}</span>
-                  </span>
-                  <span
-                    className={`font-mono-num font-bold ${
-                      stat.isFull ? 'text-red-700' : 'text-[#4E463D]'
-                    }`}
-                  >
-                    {stat.isFull
-                      ? 'القروب اكتمل'
-                      : `${stat.confirmed}/${COLOR_GROUP_CAPACITY}`}
-                  </span>
-                </div>
-                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#E6DFD3]">
-                  <div
-                    className={`h-full ${stat.isFull ? 'bg-red-600' : group.swatchClass}`}
-                    style={{
-                      width: `${Math.min(100, (stat.confirmed / COLOR_GROUP_CAPACITY) * 100)}%`,
-                    }}
-                  />
-                </div>
-                <p className="mt-1.5 text-[11px] text-[#6B6155] tabular-nums">
-                  متبقي {stat.remaining} · معلق {stat.pending}
-                </p>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      )}
 
       {/* Prominent Quick Search & Filters Toolbar */}
       <div className="space-y-4 rounded-xl border border-[#E4DDD2] bg-white p-5">
         <div>
           <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
             <label htmlFor="adminSearch" className="text-sm font-bold text-[#1E1A16]">
-              البحث السريع عن المسجلين (بالاسم الثلاثي أو رقم الهاتف)
+              البحث السريع عن المسجلين (بالاسم الثلاثي أو رقم الهاتف أو رقم الطابور)
             </label>
             <span className="text-xs text-[#6B6155] tabular-nums">
               عرض{' '}
               <strong className="font-mono-num text-[#1E1A16]">
-                {filteredRegistrations.length}
+                {visibleRegistrations.length}
               </strong>{' '}
-              من {registrations.length} حجز ({filteredMembersCount} فرد)
+              من {filteredRegistrations.length} حجز مطابق ({filteredMembersCount} فرد)
             </span>
           </div>
           <div className="relative">
@@ -619,7 +700,7 @@ export function AdminPanelView({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="اكتب الاسم الثلاثي أو جزء منه، أو رقم الهاتف (مثال: 010... أو +2010...) أو كود الحجز"
+              placeholder="اكتب الاسم الثلاثي أو جزء منه، أو رقم الهاتف (مثال: 010... أو +2010...) أو رقم الطابور"
               className="w-full rounded-lg border border-[#D4CBBF] bg-[#FAF8F4] py-3 pr-11 pl-10 text-sm text-[#1E1A16] transition-colors focus:border-[#9A5B25] focus:bg-white focus:outline-none"
             />
             {searchQuery && (
@@ -706,6 +787,7 @@ export function AdminPanelView({
                 setFilterRecipient('all');
                 setFilterPayment('all');
                 setFilterStatus('all');
+                setOnlyDuplicates(false);
               }}
               className="text-xs font-semibold text-[#7C4518] hover:underline cursor-pointer"
             >
@@ -715,7 +797,7 @@ export function AdminPanelView({
         )}
       </div>
 
-      {/* Registrations Table */}
+      {/* Lazy-Loaded Registrations Table with Queue Sequence Column */}
       <div className="overflow-hidden rounded-xl border border-[#E4DDD2] bg-white">
         {registrations.length === 0 ? (
           <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
@@ -738,226 +820,63 @@ export function AdminPanelView({
             لا توجد بيانات مطابقة لبحثك أو معايير الفرز الحالية.
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-right text-sm">
-              <thead>
-                <tr className="border-b border-[#E4DDD2] bg-[#FAF8F4] text-xs font-bold text-[#4E463D]">
-                  <th className="px-4 py-3.5 whitespace-nowrap">الأفراد وإدارة الدفع / الإلغاء</th>
-                  <th className="px-4 py-3.5 whitespace-nowrap">الباص واللون</th>
-                  <th className="px-4 py-3.5 whitespace-nowrap">المستلم وطريقة الدفع</th>
-                  <th className="px-4 py-3.5 whitespace-nowrap">الحساب المالي للحجز</th>
-                  <th className="px-4 py-3.5 whitespace-nowrap">إجراءات سريعة للحجز</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#ECE6DC]">
-                {filteredRegistrations.map((reg) => {
-                  const summary = getRegSummary(reg);
-                  const allCancelled = summary.activeCount === 0;
-                  const colorMeta = COLOR_GROUP_LIST.find((c) => c.key === reg.colorGroup);
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-right text-sm">
+                <thead>
+                  <tr className="border-b border-[#E4DDD2] bg-[#FAF8F4] text-xs font-bold text-[#4E463D]">
+                    <th className="px-4 py-3.5 whitespace-nowrap">رقم الطابور والوقت</th>
+                    <th className="px-4 py-3.5 whitespace-nowrap">الأفراد وإدارة الدفع / الإلغاء</th>
+                    <th className="px-4 py-3.5 whitespace-nowrap">الباص واللون</th>
+                    <th className="px-4 py-3.5 whitespace-nowrap">المستلم وطريقة الدفع</th>
+                    <th className="px-4 py-3.5 whitespace-nowrap">الحساب المالي للحجز</th>
+                    <th className="px-4 py-3.5 whitespace-nowrap">إجراءات سريعة للحجز</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#ECE6DC]">
+                  {visibleRegistrations.map((reg) => (
+                    <RegistrationTableRow
+                      key={reg.id}
+                      reg={reg}
+                      duplicateNameCounts={duplicateNameCounts}
+                      confirmDeleteKey={confirmDeleteKey}
+                      onSetConfirmDeleteKey={setConfirmDeleteKey}
+                      onQuickFilterName={handleQuickFilterName}
+                      onToggleMemberPaid={handleTogglePaidCb}
+                      onToggleMemberCancelled={handleToggleCancelledCb}
+                      onApproveAllInReg={handleApproveAllCb}
+                      onCancelAllInReg={handleCancelAllCb}
+                      onDeleteMember={handleDeleteMemberCb}
+                      onDeleteRegistration={handleDeleteRegCb}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
-                  return (
-                    <tr key={reg.id} className="align-top hover:bg-[#FCFBF9]">
-                      <td className="min-w-[330px] px-4 py-3.5">
-                        <div className="space-y-2">
-                          {reg.members.map((m) => {
-                            const payKey = `pay_${reg.id}_${m.id}`;
-                            const cancelKey = `cancel_${reg.id}_${m.id}`;
-                            const isRowBusy = busyActionId === payKey || busyActionId === cancelKey;
-
-                            return (
-                              <div
-                                key={m.id}
-                                className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${
-                                  m.cancelled
-                                    ? 'border-red-200 bg-red-50/60 opacity-80'
-                                    : m.paid
-                                      ? 'border-emerald-200 bg-emerald-50/50'
-                                      : 'border-[#E6DFD3] bg-white'
-                                }`}
-                              >
-                                <div className="min-w-0">
-                                  <p
-                                    className={`text-sm font-bold ${
-                                      m.cancelled
-                                        ? 'text-red-700 line-through'
-                                        : 'text-[#1E1A16]'
-                                    }`}
-                                  >
-                                    {m.name}{' '}
-                                    {m.isMain && (
-                                      <span className="text-xs font-normal text-[#6B6155]">
-                                        (الرئيسي)
-                                      </span>
-                                    )}
-                                  </p>
-                                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-[#5C5349]">
-                                    <span className="font-mono-num" dir="ltr">
-                                      {m.phone}
-                                    </span>
-                                    <span aria-hidden="true">·</span>
-                                    <span
-                                      className={`font-bold ${
-                                        m.cancelled
-                                          ? 'text-red-700'
-                                          : m.paid
-                                            ? 'text-emerald-700'
-                                            : 'text-amber-700'
-                                      }`}
-                                    >
-                                      {m.cancelled ? 'ملغي' : m.paid ? 'مدفوع' : 'لم يدفع'}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                <div className="flex shrink-0 items-center gap-1.5">
-                                  {!m.cancelled && (
-                                    <button
-                                      type="button"
-                                      disabled={busyActionId !== null}
-                                      onClick={() =>
-                                        void runAsyncAction(payKey, () =>
-                                          onToggleMemberPaid(reg.id, m.id)
-                                        )
-                                      }
-                                      className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold text-white transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer ${
-                                        m.paid
-                                          ? 'bg-amber-600 hover:bg-amber-700'
-                                          : 'bg-emerald-700 hover:bg-emerald-800'
-                                      }`}
-                                    >
-                                      {isRowBusy && busyActionId === payKey ? (
-                                        <span>...</span>
-                                      ) : m.paid ? (
-                                        <span>إلغاء الدفع</span>
-                                      ) : (
-                                        <>
-                                          <Check className="h-3.5 w-3.5" />
-                                          <span>تأكيد دفع</span>
-                                        </>
-                                      )}
-                                    </button>
-                                  )}
-
-                                  <button
-                                    type="button"
-                                    disabled={busyActionId !== null}
-                                    onClick={() =>
-                                      void runAsyncAction(cancelKey, () =>
-                                        onToggleMemberCancelled(reg.id, m.id)
-                                      )
-                                    }
-                                    className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold text-white transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer ${
-                                      m.cancelled
-                                        ? 'bg-sky-700 hover:bg-sky-800'
-                                        : 'bg-red-700 hover:bg-red-800'
-                                    }`}
-                                  >
-                                    {isRowBusy && busyActionId === cancelKey ? (
-                                      <span>...</span>
-                                    ) : m.cancelled ? (
-                                      <>
-                                        <RotateCcw className="h-3 w-3" />
-                                        <span>استرجاع</span>
-                                      </>
-                                    ) : (
-                                      <span>إلغاء</span>
-                                    )}
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </td>
-
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        <p className="font-bold text-[#1E1A16]">{LABELS.buses[reg.bus]}</p>
-                        <p className="mt-1 flex items-center gap-1.5 text-xs text-[#4E463D]">
-                          {colorMeta && (
-                            <span className={`h-2.5 w-2.5 rounded-xs ${colorMeta.swatchClass}`} />
-                          )}
-                          <span>قروب {LABELS.colors[reg.colorGroup]}</span>
-                        </p>
-                        <p className="mt-1 text-xs text-[#7B7165]">
-                          {reg.isGroup ? 'مجموعة' : 'فردي'}
-                        </p>
-                      </td>
-
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        <p className="font-bold text-[#1E1A16]">
-                          {LABELS.recipients[reg.recipient]}
-                        </p>
-                        <div className="mt-1 flex items-center gap-1.5 text-xs text-[#4E463D]">
-                          <PaymentMethodIcon
-                            method={reg.paymentMethod}
-                            className="h-5 w-5 shrink-0"
-                          />
-                          <span>{LABELS.payments[reg.paymentMethod]}</span>
-                        </div>
-                        <p className="mt-1 text-[11px] text-[#7B7165]">{reg.timestamp}</p>
-                        <p className="mt-0.5 font-mono-num text-[11px] text-[#8C8173]">
-                          #{reg.id}
-                        </p>
-                      </td>
-
-                      <td className="space-y-1 px-4 py-3.5 text-xs tabular-nums whitespace-nowrap">
-                        <p className="text-[#1E1A16]">
-                          المطلوب:{' '}
-                          <strong className="font-mono-num">{summary.expectedMoney} ج</strong> (
-                          {summary.activeCount} نشط)
-                        </p>
-                        <p className="text-emerald-700">
-                          المدفوع:{' '}
-                          <strong className="font-mono-num">{summary.paidMoney} ج</strong> (
-                          {summary.paidCount} فرد)
-                        </p>
-                        <p className="text-amber-700">
-                          المتبقي:{' '}
-                          <strong className="font-mono-num">{summary.remainingMoney} ج</strong>
-                        </p>
-                      </td>
-
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        <div className="flex flex-col gap-1.5">
-                          {!allCancelled && (
-                            <button
-                              type="button"
-                              disabled={busyActionId !== null}
-                              onClick={() =>
-                                void runAsyncAction(`approveAll_${reg.id}`, () =>
-                                  onApproveAllInReg(reg.id)
-                                )
-                              }
-                              className="inline-flex items-center justify-center gap-1 rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-800 disabled:opacity-50 cursor-pointer"
-                            >
-                              <Check className="h-3.5 w-3.5" />
-                              <span>Approve الكل</span>
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            disabled={busyActionId !== null}
-                            onClick={() =>
-                              void runAsyncAction(`cancelAll_${reg.id}`, () =>
-                                onCancelAllInReg(reg.id)
-                              )
-                            }
-                            className={`rounded-md px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:opacity-50 cursor-pointer ${
-                              allCancelled
-                                ? 'bg-sky-700 hover:bg-sky-800'
-                                : 'bg-red-700 hover:bg-red-800'
-                            }`}
-                          >
-                            {allCancelled ? 'استرجاع الحجز' : 'إلغاء الحجز بالكامل'}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+            {remainingToLoad > 0 && (
+              <div
+                ref={loadMoreSentinelRef}
+                className="flex flex-col items-center justify-center gap-2 border-t border-[#ECE6DC] bg-[#FAF8F4] px-4 py-4"
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    setVisibleCount((prev) =>
+                      Math.min(filteredRegistrations.length, prev + LAZY_PAGE_SIZE)
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4CBBF] bg-white px-5 py-2 text-xs font-bold text-[#1E1A16] transition-colors hover:bg-[#F5F1E9] cursor-pointer"
+                >
+                  <ChevronDown className="h-4 w-4 text-[#7C4518]" />
+                  <span>
+                    عرض المزيد ({Math.min(LAZY_PAGE_SIZE, remainingToLoad)} من أصل{' '}
+                    {remainingToLoad} متبقي)
+                  </span>
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

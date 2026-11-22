@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   AlertCircle,
   ArrowDown,
@@ -38,6 +38,7 @@ import {
 } from '../utils/validation';
 import { MonasteryBannerImage } from './MonasteryBannerImage';
 import { PaymentMethodIcon } from './PaymentMethodIcon';
+import { generateRequestId, type RetryStatusCallback } from '../services/sheetsApi';
 
 interface CompanionDraft {
   keyId: string;
@@ -68,7 +69,11 @@ export interface SubmitBookingResult {
 interface RegistrationViewProps {
   capacities: CapacityCounts;
   whatsappNumbers: WhatsAppConfig;
-  onAddRegistration: (record: RegistrationRecord) => Promise<SubmitBookingResult>;
+  onAddRegistration: (
+    record: RegistrationRecord,
+    requestId: string,
+    onRetryStatus?: RetryStatusCallback
+  ) => Promise<SubmitBookingResult>;
 }
 
 export function RegistrationView({
@@ -95,9 +100,14 @@ export function RegistrationView({
 
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [retryStatusText, setRetryStatusText] = useState<string>('');
   const [formError, setFormError] = useState<string>('');
   const [confirmedBooking, setConfirmedBooking] = useState<RegistrationRecord | null>(null);
   const [copied, setCopied] = useState(false);
+  const [redirectSeconds, setRedirectSeconds] = useState<number | null>(null);
+  const [autoRedirectDone, setAutoRedirectDone] = useState(false);
+  const whatsappLinkRef = useRef<HTMLAnchorElement | null>(null);
+  const manualRedirectRef = useRef(false);
 
   const totalPersons = regType === 'group' ? 1 + companions.length : 1;
   const totalPrice = totalPersons * TICKET_PRICE;
@@ -201,9 +211,13 @@ export function RegistrationView({
     setColorClickedFull('');
     setPaymentMethod('');
     setSubmitAttempted(false);
+    setRetryStatusText('');
     setFormError('');
     setConfirmedBooking(null);
     setCopied(false);
+    setRedirectSeconds(null);
+    setAutoRedirectDone(false);
+    manualRedirectRef.current = false;
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -304,8 +318,10 @@ export function RegistrationView({
       });
     }
 
+    const requestId = generateRequestId();
     const newRecord: RegistrationRecord = {
       id: regId,
+      requestId,
       isGroup: regType === 'group',
       members,
       bus: busChoice,
@@ -316,8 +332,13 @@ export function RegistrationView({
     };
 
     setIsSubmitting(true);
+    setRetryStatusText('');
     try {
-      const result = await onAddRegistration(newRecord);
+      const result = await onAddRegistration(newRecord, requestId, (attempt) => {
+        setRetryStatusText(
+          `جاري تثبيت حجزك في الطابور... يرجى عدم إغلاق الصفحة (محاولة ${attempt})`
+        );
+      });
       if (!result.ok) {
         setFormError(result.error || 'تعذر حفظ التسجيل، يرجى المحاولة مرة أخرى.');
         return;
@@ -328,6 +349,7 @@ export function RegistrationView({
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } finally {
       setIsSubmitting(false);
+      setRetryStatusText('');
     }
   };
 
@@ -344,6 +366,37 @@ export function RegistrationView({
   const whatsappDetails = confirmedBooking
     ? buildWhatsAppDetails(confirmedBooking, whatsappNumbers)
     : null;
+
+  useEffect(() => {
+    if (!confirmedBooking || !whatsappDetails) return;
+
+    manualRedirectRef.current = false;
+    setAutoRedirectDone(false);
+    setRedirectSeconds(1);
+
+    const redirectTimer = window.setTimeout(() => {
+      if (manualRedirectRef.current) return;
+      setRedirectSeconds(0);
+      setAutoRedirectDone(true);
+
+      let inIframe = false;
+      try {
+        inIframe = window.self !== window.top;
+      } catch {
+        inIframe = true;
+      }
+
+      if (inIframe) {
+        whatsappLinkRef.current?.click();
+      } else {
+        window.location.assign(whatsappDetails.url);
+      }
+    }, 1200);
+
+    return () => {
+      window.clearTimeout(redirectTimer);
+    };
+  }, [confirmedBooking, whatsappDetails?.url]);
 
   return (
     <div className="space-y-10 pb-16 pt-8 md:pt-12">
@@ -390,7 +443,25 @@ export function RegistrationView({
               <h2 className="mt-3 font-display text-2xl font-bold text-[#1E1A16]">
                 تم تسجيل بيانات الحجز بنجاح
               </h2>
-              <p className="mt-1.5 text-sm text-[#5C5349]">
+              {(typeof confirmedBooking.seqNo === 'number' || confirmedBooking.timestamp) && (
+                <div className="mt-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
+                  {typeof confirmedBooking.seqNo === 'number' && confirmedBooking.seqNo > 0 && (
+                    <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-bold text-emerald-900">
+                      رقم الطابور:{' '}
+                      <strong className="font-mono-num">#{confirmedBooking.seqNo}</strong>
+                    </span>
+                  )}
+                  {confirmedBooking.timestamp && (
+                    <span className="rounded-md border border-[#E4DDD2] bg-[#FAF8F4] px-2.5 py-1 font-medium text-[#4E463D]">
+                      وقت التثبيت:{' '}
+                      <strong className="font-mono-num" dir="ltr">
+                        {confirmedBooking.timestamp}
+                      </strong>
+                    </span>
+                  )}
+                </div>
+              )}
+              <p className="mt-2 text-sm text-[#5C5349]">
                 كود الحجز:{' '}
                 <strong className="font-mono-num text-[#1E1A16]">{confirmedBooking.id}</strong> ·
                 يرجى الضغط على زر الواتساب أدناه لإرسال رسالة التأكيد وإتمام الدفع لدى{' '}
@@ -462,11 +533,31 @@ export function RegistrationView({
               </pre>
             </div>
 
-            <div className="mt-6 flex flex-wrap items-center gap-3">
+            <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50/70 px-4 py-2.5 text-center text-xs font-semibold text-emerald-900">
+              {autoRedirectDone ? (
+                <span>
+                  تم تحويلك إلى واتساب ({LABELS.recipients[confirmedBooking.recipient]}) تلقائياً —
+                  إذا لم يُفتح التطبيق اضغط زر التحويل أدناه.
+                </span>
+              ) : (
+                <span>
+                  سيتم تحويلك تلقائياً إلى واتساب ({LABELS.recipients[confirmedBooking.recipient]})
+                  خلال <strong className="font-mono-num">{redirectSeconds ?? 2}</strong> ثانية...
+                </span>
+              )}
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
               <a
+                ref={whatsappLinkRef}
                 href={whatsappDetails.url}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => {
+                  manualRedirectRef.current = true;
+                  setRedirectSeconds(0);
+                  setAutoRedirectDone(true);
+                }}
                 className="inline-flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-emerald-800 whitespace-nowrap"
               >
                 <span>التحويل إلى واتساب ({LABELS.recipients[confirmedBooking.recipient]})</span>
@@ -1091,9 +1182,11 @@ export function RegistrationView({
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="inline-flex min-h-[46px] items-center justify-center rounded-lg bg-[#9A5B25] px-7 py-3 text-sm font-bold text-white transition-colors hover:bg-[#7C4518] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9A5B25] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                  className="inline-flex min-h-[46px] items-center justify-center rounded-lg bg-[#9A5B25] px-7 py-3 text-sm font-bold text-white transition-colors hover:bg-[#7C4518] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9A5B25] disabled:opacity-70 cursor-pointer"
                 >
-                  {isSubmitting ? 'جارٍ حفظ التسجيل...' : 'تأكيد التسجيل والتحويل للواتساب'}
+                  {isSubmitting
+                    ? retryStatusText || 'جارٍ تثبيت حجزك في الطابور... يرجى عدم إغلاق الصفحة'
+                    : 'تأكيد التسجيل والتحويل للواتساب'}
                 </button>
               </div>
             </div>

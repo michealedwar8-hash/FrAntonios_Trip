@@ -6,6 +6,7 @@ import {
   COLOR_GROUP_LIST,
   LABELS,
   PAYMENT_METHOD_LIST,
+  PAYMENT_RECIPIENT_MAP,
   TICKET_PRICE,
   type BookingStatusKey,
   type BusKey,
@@ -191,6 +192,7 @@ export function getCapacityCounts(registrations: RegistrationRecord[]): Capacity
   const colorPending: Record<ColorGroupKey, number> = { red: 0, blue: 0, yellow: 0, green: 0 };
 
   for (const reg of registrations) {
+    if (reg.isTest) continue;
     for (const member of reg.members) {
       if (member.cancelled) continue;
       if (member.paid) {
@@ -270,6 +272,7 @@ export function calculateFinancialStats(
   };
 
   for (const r of list) {
+    if (r.isTest) continue;
     const s = getRegSummary(r);
     stats.expectedMoney += s.expectedMoney;
     stats.paidMoney += s.paidMoney;
@@ -292,8 +295,8 @@ export function buildWhatsAppDetails(
   data: RegistrationRecord,
   whatsappNumbers: WhatsAppConfig
 ): { url: string; message: string; phoneNum: string } {
-  const phoneNum = whatsappNumbers[data.recipient][data.paymentMethod];
-  const recipientName = LABELS.recipients[data.recipient];
+  const resolvedRecipient = PAYMENT_RECIPIENT_MAP[data.paymentMethod] ?? data.recipient;
+  const phoneNum = whatsappNumbers[resolvedRecipient][data.paymentMethod];
   const paymentName = LABELS.payments[data.paymentMethod];
   const mainMember = data.members[0];
   const companions = data.members.slice(1);
@@ -305,7 +308,7 @@ export function buildWhatsAppDetails(
     : '';
 
   const message =
-    `مرحباً ${recipientName}، أود تأكيد حجز رحلة دير الأنبا أنطونيوس.\n` +
+    `سلام و نعمة\n` +
     `الاسم: ${mainMember.name}\n` +
     `رقم الهاتف: ${mainMember.phone}\n` +
     `عدد الأفراد: ${totalPersons}${companionsNames}\n` +
@@ -425,6 +428,42 @@ export function normalizeArabicText(value: string): string {
 }
 
 /**
+ * Counts occurrences of each normalized member name across all real (non-test)
+ * registrations, returning a Map of normalizedName -> occurrence count (> 1 means duplicate).
+ */
+export function getDuplicateNameCounts(
+  registrations: RegistrationRecord[]
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const reg of registrations) {
+    if (reg.isTest) continue;
+    for (const member of reg.members) {
+      const key = normalizeArabicText(member.name);
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+
+  return counts;
+}
+
+/**
+ * Returns true if any member inside a non-test registration shares a normalized name
+ * with at least one other member across the registrations list.
+ */
+export function hasDuplicateMemberName(
+  reg: RegistrationRecord,
+  duplicateNameCounts: Map<string, number>
+): boolean {
+  if (reg.isTest) return false;
+  return reg.members.some((member) => {
+    const key = normalizeArabicText(member.name);
+    return key !== '' && (duplicateNameCounts.get(key) ?? 0) > 1;
+  });
+}
+
+/**
  * Matches a registration record against a search query by triple name,
  * phone number (supporting +20, 01..., 1..., or Arabic numerals), or booking ID.
  */
@@ -437,6 +476,10 @@ export function matchesRegistrationSearch(reg: RegistrationRecord, rawQuery: str
   const strippedLeadingZeroDigits = queryDigits.replace(/^20/, '').replace(/^0/, '');
 
   if (queryDigits && String(reg.id).includes(queryDigits)) {
+    return true;
+  }
+
+  if (queryDigits && typeof reg.seqNo === 'number' && String(reg.seqNo) === queryDigits) {
     return true;
   }
 

@@ -15,6 +15,9 @@ export interface MemberRecord {
 
 export interface RegistrationRecord {
   id: number;
+  requestId?: string;
+  seqNo?: number;
+  isTest?: boolean;
   isGroup: boolean;
   members: MemberRecord[];
   bus: BusKey;
@@ -34,6 +37,7 @@ export const STORAGE_KEY = 'trip_registrations';
 export const WHATSAPP_STORAGE_KEY = 'trip_whatsapp_numbers_v2';
 export const ADMIN_PIN_HASH_KEY = 'trip_admin_pin_hash_v1';
 export const ADMIN_SESSION_KEY = 'trip_admin_session_v1';
+export const ADMIN_STRESS_SECRET = 'THREEYOUTH_ANTHONY_2026_ADMIN';
 
 // Official WhatsApp numbers for the two organizers
 export const MEKHAIL_PHONE_DIGITS = '1288651567';

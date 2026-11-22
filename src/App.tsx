@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ADMIN_SESSION_KEY,
   BUS_CAPACITY,
@@ -21,9 +21,13 @@ import {
   approveAllInSheets,
   cancelAllInSheets,
   createRegistrationInSheets,
+  deleteMemberInSheets,
+  deleteRegistrationInSheets,
   fetchRegistrationsFromSheets,
   toggleMemberCancelledInSheets,
   toggleMemberPaidInSheets,
+  type RetryStatusCallback,
+  type SheetsApiResponse,
 } from './services/sheetsApi';
 import { RegistrationView, type SubmitBookingResult } from './components/RegistrationView';
 import { AdminAuthGate } from './components/AdminAuthGate';
@@ -82,6 +86,11 @@ export default function App() {
   const [whatsappNumbers, setWhatsAppNumbers] = useState<WhatsAppConfig>(loadInitialWhatsAppConfig);
   const [googleScriptUrl, setGoogleScriptUrl] = useState<string>(getActiveGoogleScriptUrl);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [pendingSavesCount, setPendingSavesCount] = useState(0);
+  const [cloudNotice, setCloudNotice] = useState<string>('');
+
+  const mutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const mutationSeqRef = useRef<number>(0);
 
   const isCloudConnected = isValidGoogleScriptUrl(googleScriptUrl);
 
@@ -105,6 +114,52 @@ export default function App() {
       setIsSyncingSheets(false);
     }
   }, [googleScriptUrl]);
+
+  /**
+   * Queues a Google Sheets write strictly in order behind an instant optimistic UI update.
+   * Keeps the UI 0ms responsive while guaranteeing sequential consistency with Google Sheets.
+   */
+  const enqueueCloudMutation = useCallback(
+    (task: () => Promise<SheetsApiResponse>, fallbackError: string) => {
+      const mySeq = ++mutationSeqRef.current;
+      setPendingSavesCount((c) => c + 1);
+
+      mutationQueueRef.current = mutationQueueRef.current
+        .then(async () => {
+          try {
+            const res = await task();
+            if (!res.ok) {
+              const rawErr = res.error || fallbackError;
+              const friendlyErr = rawErr.includes('عملية غير معروفة: delete')
+                ? 'يرجى تحديث كود Google Apps Script ونشر إصدار جديد (New version) لتفعيل الحذف النهائي من الشيت.'
+                : rawErr;
+              setCloudNotice(friendlyErr);
+              if (Array.isArray(res.registrations)) {
+                setRegistrations(res.registrations);
+              } else {
+                void syncFromSheets();
+              }
+              return;
+            }
+
+            if (mySeq === mutationSeqRef.current && Array.isArray(res.registrations)) {
+              setRegistrations(res.registrations);
+            }
+          } catch (err) {
+            setCloudNotice(
+              err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets لحفظ التغيير.'
+            );
+            void syncFromSheets();
+          } finally {
+            setPendingSavesCount((c) => Math.max(0, c - 1));
+          }
+        })
+        .catch(() => {
+          setPendingSavesCount((c) => Math.max(0, c - 1));
+        });
+    },
+    [syncFromSheets]
+  );
 
   useEffect(() => {
     if (isCloudConnected) {
@@ -213,12 +268,19 @@ export default function App() {
   };
 
   const handleAddRegistration = async (
-    record: RegistrationRecord
+    record: RegistrationRecord,
+    requestId: string,
+    onRetryStatus?: RetryStatusCallback
   ): Promise<SubmitBookingResult> => {
     if (isCloudConnected) {
       try {
-        const res = await createRegistrationInSheets(googleScriptUrl, record);
-        if (!res.ok) {
+        const res = await createRegistrationInSheets(
+          googleScriptUrl,
+          record,
+          requestId,
+          onRetryStatus
+        );
+        if (!res.ok && !res.success) {
           if (Array.isArray(res.registrations)) {
             setRegistrations(res.registrations);
           } else {
@@ -230,12 +292,24 @@ export default function App() {
           };
         }
 
+        const seqNo = res.seqNo ?? res.data?.seqNo ?? res.created?.seqNo;
+        const timestamp = res.timestamp ?? res.data?.timestamp ?? res.created?.timestamp ?? record.timestamp;
+        const createdRecord: RegistrationRecord = {
+          ...(res.created ?? res.data?.created ?? record),
+          requestId,
+          seqNo,
+          timestamp,
+        };
+
         if (Array.isArray(res.registrations)) {
           setRegistrations(res.registrations);
         } else {
-          setRegistrations((prev) => [res.created ?? record, ...prev]);
+          setRegistrations((prev) => [
+            createdRecord,
+            ...prev.filter((r) => r.id !== createdRecord.id && (!requestId || r.requestId !== requestId)),
+          ]);
         }
-        return { ok: true, created: res.created ?? record };
+        return { ok: true, created: createdRecord };
       } catch (err) {
         return {
           ok: false,
@@ -247,14 +321,18 @@ export default function App() {
       }
     }
 
-    setRegistrations((prev) => [record, ...prev]);
-    return { ok: true, created: record };
+    const maxSeq = registrations.reduce((max, r) => Math.max(max, r.seqNo ?? 0), 0);
+    const localRecord: RegistrationRecord = {
+      ...record,
+      requestId,
+      seqNo: maxSeq + 1,
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 23),
+    };
+    setRegistrations((prev) => [localRecord, ...prev]);
+    return { ok: true, created: localRecord };
   };
 
-  const handleToggleMemberPaid = async (
-    regId: number,
-    memberId: string
-  ): Promise<string | null> => {
+  const handleToggleMemberPaid = (regId: number, memberId: string): string | null => {
     const targetReg = registrations.find((r) => r.id === regId);
     if (!targetReg) return null;
     const targetMember = targetReg.members.find((m) => m.id === memberId);
@@ -271,21 +349,7 @@ export default function App() {
       }
     }
 
-    if (isCloudConnected) {
-      try {
-        const res = await toggleMemberPaidInSheets(googleScriptUrl, regId, memberId);
-        if (!res.ok) {
-          return res.error || 'تعذر تحديث حالة الدفع في Google Sheets.';
-        }
-        if (Array.isArray(res.registrations)) {
-          setRegistrations(res.registrations);
-        }
-        return null;
-      } catch (err) {
-        return err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets.';
-      }
-    }
-
+    setCloudNotice('');
     setRegistrations((prev) =>
       prev.map((reg) =>
         reg.id !== regId
@@ -298,28 +362,18 @@ export default function App() {
             }
       )
     );
+
+    if (isCloudConnected) {
+      enqueueCloudMutation(
+        () => toggleMemberPaidInSheets(googleScriptUrl, regId, memberId),
+        'تعذر تحديث حالة الدفع في Google Sheets.'
+      );
+    }
     return null;
   };
 
-  const handleToggleMemberCancelled = async (
-    regId: number,
-    memberId: string
-  ): Promise<string | null> => {
-    if (isCloudConnected) {
-      try {
-        const res = await toggleMemberCancelledInSheets(googleScriptUrl, regId, memberId);
-        if (!res.ok) {
-          return res.error || 'تعذر تحديث حالة الإلغاء في Google Sheets.';
-        }
-        if (Array.isArray(res.registrations)) {
-          setRegistrations(res.registrations);
-        }
-        return null;
-      } catch (err) {
-        return err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets.';
-      }
-    }
-
+  const handleToggleMemberCancelled = (regId: number, memberId: string): string | null => {
+    setCloudNotice('');
     setRegistrations((prev) =>
       prev.map((reg) =>
         reg.id !== regId
@@ -338,10 +392,17 @@ export default function App() {
             }
       )
     );
+
+    if (isCloudConnected) {
+      enqueueCloudMutation(
+        () => toggleMemberCancelledInSheets(googleScriptUrl, regId, memberId),
+        'تعذر تحديث حالة الإلغاء في Google Sheets.'
+      );
+    }
     return null;
   };
 
-  const handleApproveAllInReg = async (regId: number): Promise<string | null> => {
+  const handleApproveAllInReg = (regId: number): string | null => {
     const targetReg = registrations.find((r) => r.id === regId);
     if (!targetReg) return null;
 
@@ -362,21 +423,7 @@ export default function App() {
         : `لا يمكن تأكيد الكل (${toApproveCount} أفراد): المتبقي في قروب ${LABELS.colors[targetReg.colorGroup]} هو ${colorStat.remaining} مقعد فقط.`;
     }
 
-    if (isCloudConnected) {
-      try {
-        const res = await approveAllInSheets(googleScriptUrl, regId);
-        if (!res.ok) {
-          return res.error || 'تعذر تأكيد الدفع للجميع في Google Sheets.';
-        }
-        if (Array.isArray(res.registrations)) {
-          setRegistrations(res.registrations);
-        }
-        return null;
-      } catch (err) {
-        return err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets.';
-      }
-    }
-
+    setCloudNotice('');
     setRegistrations((prev) =>
       prev.map((reg) =>
         reg.id !== regId
@@ -387,25 +434,18 @@ export default function App() {
             }
       )
     );
+
+    if (isCloudConnected) {
+      enqueueCloudMutation(
+        () => approveAllInSheets(googleScriptUrl, regId),
+        'تعذر تأكيد الدفع للجميع في Google Sheets.'
+      );
+    }
     return null;
   };
 
-  const handleCancelAllInReg = async (regId: number): Promise<string | null> => {
-    if (isCloudConnected) {
-      try {
-        const res = await cancelAllInSheets(googleScriptUrl, regId);
-        if (!res.ok) {
-          return res.error || 'تعذر تحديث حالة الحجز في Google Sheets.';
-        }
-        if (Array.isArray(res.registrations)) {
-          setRegistrations(res.registrations);
-        }
-        return null;
-      } catch (err) {
-        return err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets.';
-      }
-    }
-
+  const handleCancelAllInReg = (regId: number): string | null => {
+    setCloudNotice('');
     setRegistrations((prev) =>
       prev.map((reg) => {
         if (reg.id !== regId) return reg;
@@ -420,8 +460,64 @@ export default function App() {
         };
       })
     );
+
+    if (isCloudConnected) {
+      enqueueCloudMutation(
+        () => cancelAllInSheets(googleScriptUrl, regId),
+        'تعذر تحديث حالة الحجز في Google Sheets.'
+      );
+    }
     return null;
   };
+
+  const handleDeleteMember = (regId: number, memberId: string): string | null => {
+    setCloudNotice('');
+    setRegistrations((prev) =>
+      prev
+        .map((reg) =>
+          reg.id !== regId
+            ? reg
+            : {
+                ...reg,
+                members: reg.members.filter((m) => m.id !== memberId),
+              }
+        )
+        .filter((reg) => reg.members.length > 0)
+    );
+
+    if (isCloudConnected) {
+      enqueueCloudMutation(
+        () => deleteMemberInSheets(googleScriptUrl, regId, memberId),
+        'تعذر حذف الفرد نهائياً من Google Sheets.'
+      );
+    }
+    return null;
+  };
+
+  const handleDeleteRegistration = (regId: number): string | null => {
+    setCloudNotice('');
+    setRegistrations((prev) => prev.filter((reg) => reg.id !== regId));
+
+    if (isCloudConnected) {
+      enqueueCloudMutation(
+        () => deleteRegistrationInSheets(googleScriptUrl, regId),
+        'تعذر حذف الحجز نهائياً من Google Sheets.'
+      );
+    }
+    return null;
+  };
+
+  const handleReplaceRegistrations = useCallback((next: RegistrationRecord[]) => {
+    setRegistrations(next);
+  }, []);
+
+  const handleClearLocalTestRecords = useCallback(() => {
+    setRegistrations((prev) => prev.filter((r) => !r.isTest));
+  }, []);
+
+  const handleAppendLocalTestRecords = useCallback((records: RegistrationRecord[]) => {
+    setRegistrations((prev) => [...records.slice().reverse(), ...prev]);
+  }, []);
 
   return (
     <div className="flex min-h-screen flex-col bg-[#F9F7F3] text-[#1E1A16]">
@@ -462,13 +558,21 @@ export default function App() {
             whatsappNumbers={whatsappNumbers}
             googleScriptUrl={googleScriptUrl}
             isSyncingSheets={isSyncingSheets}
+            pendingSavesCount={pendingSavesCount}
+            cloudNotice={cloudNotice}
+            onDismissCloudNotice={() => setCloudNotice('')}
             onSyncSheets={() => syncFromSheets()}
+            onReplaceRegistrations={handleReplaceRegistrations}
+            onClearLocalTestRecords={handleClearLocalTestRecords}
+            onAppendLocalTestRecords={handleAppendLocalTestRecords}
             onUpdateGoogleScriptUrl={handleUpdateGoogleScriptUrl}
             onUpdateWhatsAppNumbers={setWhatsAppNumbers}
             onToggleMemberPaid={handleToggleMemberPaid}
             onToggleMemberCancelled={handleToggleMemberCancelled}
             onApproveAllInReg={handleApproveAllInReg}
             onCancelAllInReg={handleCancelAllInReg}
+            onDeleteMember={handleDeleteMember}
+            onDeleteRegistration={handleDeleteRegistration}
             onGoToRegister={() => goToPublic(true)}
             onLogout={handleOrganizerLogout}
           />
