@@ -91,29 +91,73 @@ export default function App() {
 
   const mutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const mutationSeqRef = useRef<number>(0);
+  const pendingSavesRef = useRef<number>(0);
+  const stressTestBusyRef = useRef<boolean>(false);
+  const silentSyncInFlightRef = useRef<boolean>(false);
+  const lastRegistrationsJsonRef = useRef<string>('');
+  const syncChannelRef = useRef<BroadcastChannel | null>(null);
 
   const isCloudConnected = isValidGoogleScriptUrl(googleScriptUrl);
 
-  const syncFromSheets = useCallback(async (urlOverride?: string): Promise<string | null> => {
-    const targetUrl = (urlOverride ?? googleScriptUrl).trim();
-    if (!isValidGoogleScriptUrl(targetUrl)) return null;
+  const applyRegistrationsIfChanged = useCallback(
+    (next: RegistrationRecord[], broadcast = false) => {
+      const serialized = JSON.stringify(next);
+      if (serialized === lastRegistrationsJsonRef.current) return;
+      lastRegistrationsJsonRef.current = serialized;
+      setRegistrations(next);
+      if (broadcast) {
+        try {
+          syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
+        } catch {
+          // ignore BroadcastChannel errors
+        }
+      }
+    },
+    []
+  );
 
-    setIsSyncingSheets(true);
-    try {
-      const res = await fetchRegistrationsFromSheets(targetUrl);
-      if (!res.ok) {
-        return res.error || 'تعذر قراءة البيانات من Google Sheets.';
+  const syncFromSheets = useCallback(
+    async (urlOverride?: string, silent = false): Promise<string | null> => {
+      const targetUrl = (urlOverride ?? googleScriptUrl).trim();
+      if (!isValidGoogleScriptUrl(targetUrl)) return null;
+
+      if (silent) {
+        if (
+          silentSyncInFlightRef.current ||
+          pendingSavesRef.current > 0 ||
+          stressTestBusyRef.current
+        ) {
+          return null;
+        }
+        silentSyncInFlightRef.current = true;
+      } else {
+        setIsSyncingSheets(true);
       }
-      if (Array.isArray(res.registrations)) {
-        setRegistrations(res.registrations);
+
+      try {
+        const res = await fetchRegistrationsFromSheets(targetUrl);
+        if (!res.ok) {
+          return res.error || 'تعذر قراءة البيانات من Google Sheets.';
+        }
+        if (Array.isArray(res.registrations)) {
+          // Do not overwrite optimistic local edits that started while this fetch was in-flight
+          if (!silent || (pendingSavesRef.current === 0 && !stressTestBusyRef.current)) {
+            applyRegistrationsIfChanged(res.registrations, false);
+          }
+        }
+        return null;
+      } catch (err) {
+        return err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets.';
+      } finally {
+        if (silent) {
+          silentSyncInFlightRef.current = false;
+        } else {
+          setIsSyncingSheets(false);
+        }
       }
-      return null;
-    } catch (err) {
-      return err instanceof Error ? err.message : 'تعذر الاتصال بـ Google Sheets.';
-    } finally {
-      setIsSyncingSheets(false);
-    }
-  }, [googleScriptUrl]);
+    },
+    [googleScriptUrl, applyRegistrationsIfChanged]
+  );
 
   /**
    * Queues a Google Sheets write strictly in order behind an instant optimistic UI update.
@@ -122,6 +166,7 @@ export default function App() {
   const enqueueCloudMutation = useCallback(
     (task: () => Promise<SheetsApiResponse>, fallbackError: string) => {
       const mySeq = ++mutationSeqRef.current;
+      pendingSavesRef.current += 1;
       setPendingSavesCount((c) => c + 1);
 
       mutationQueueRef.current = mutationQueueRef.current
@@ -135,7 +180,7 @@ export default function App() {
                 : rawErr;
               setCloudNotice(friendlyErr);
               if (Array.isArray(res.registrations)) {
-                setRegistrations(res.registrations);
+                applyRegistrationsIfChanged(res.registrations, true);
               } else {
                 void syncFromSheets();
               }
@@ -143,7 +188,7 @@ export default function App() {
             }
 
             if (mySeq === mutationSeqRef.current && Array.isArray(res.registrations)) {
-              setRegistrations(res.registrations);
+              applyRegistrationsIfChanged(res.registrations, true);
             }
           } catch (err) {
             setCloudNotice(
@@ -151,21 +196,86 @@ export default function App() {
             );
             void syncFromSheets();
           } finally {
+            pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
             setPendingSavesCount((c) => Math.max(0, c - 1));
           }
         })
         .catch(() => {
+          pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
           setPendingSavesCount((c) => Math.max(0, c - 1));
         });
     },
-    [syncFromSheets]
+    [syncFromSheets, applyRegistrationsIfChanged]
   );
 
+  // Initial load + Real-Time Automatic Live Polling (every 4s) + Tab Focus / Visibility Refresh
   useEffect(() => {
-    if (isCloudConnected) {
-      void syncFromSheets();
-    }
+    if (!isCloudConnected) return;
+
+    void syncFromSheets(undefined, false);
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void syncFromSheets(undefined, true);
+      }
+    }, 4000);
+
+    const handleResumeSync = () => {
+      if (document.visibilityState === 'visible') {
+        void syncFromSheets(undefined, true);
+      }
+    };
+
+    window.addEventListener('focus', handleResumeSync);
+    window.addEventListener('online', handleResumeSync);
+    document.addEventListener('visibilitychange', handleResumeSync);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleResumeSync);
+      window.removeEventListener('online', handleResumeSync);
+      document.removeEventListener('visibilitychange', handleResumeSync);
+    };
   }, [isCloudConnected, syncFromSheets]);
+
+  // Instant Cross-Tab Live Sync (BroadcastChannel + localStorage event)
+  useEffect(() => {
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        channel = new BroadcastChannel('trip_registrations_live_sync_v1');
+        syncChannelRef.current = channel;
+        channel.onmessage = (event) => {
+          if (
+            event.data?.type === 'REGISTRATIONS_UPDATED' &&
+            Array.isArray(event.data.registrations)
+          ) {
+            applyRegistrationsIfChanged(event.data.registrations, false);
+          }
+        };
+      } catch {
+        channel = null;
+      }
+    }
+
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY && e.newValue) {
+        try {
+          const parsed = migrateLegacyRegistrations(JSON.parse(e.newValue));
+          applyRegistrationsIfChanged(parsed, false);
+        } catch {
+          // ignore invalid JSON
+        }
+      }
+    };
+
+    window.addEventListener('storage', handleStorageEvent);
+    return () => {
+      window.removeEventListener('storage', handleStorageEvent);
+      syncChannelRef.current = null;
+      channel?.close();
+    };
+  }, [applyRegistrationsIfChanged]);
 
   useEffect(() => {
     const handleLocationChange = () => {
@@ -185,7 +295,9 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(registrations));
+      const serialized = JSON.stringify(registrations);
+      lastRegistrationsJsonRef.current = serialized;
+      localStorage.setItem(STORAGE_KEY, serialized);
     } catch {
       // Ignore storage quota errors cleanly
     }
@@ -282,9 +394,9 @@ export default function App() {
         );
         if (!res.ok && !res.success) {
           if (Array.isArray(res.registrations)) {
-            setRegistrations(res.registrations);
+            applyRegistrationsIfChanged(res.registrations, true);
           } else {
-            void syncFromSheets();
+            void syncFromSheets(undefined, true);
           }
           return {
             ok: false,
@@ -302,12 +414,20 @@ export default function App() {
         };
 
         if (Array.isArray(res.registrations)) {
-          setRegistrations(res.registrations);
+          applyRegistrationsIfChanged(res.registrations, true);
         } else {
-          setRegistrations((prev) => [
-            createdRecord,
-            ...prev.filter((r) => r.id !== createdRecord.id && (!requestId || r.requestId !== requestId)),
-          ]);
+          setRegistrations((prev) => {
+            const next = [
+              createdRecord,
+              ...prev.filter((r) => r.id !== createdRecord.id && (!requestId || r.requestId !== requestId)),
+            ];
+            try {
+              syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
+            } catch {
+              // ignore
+            }
+            return next;
+          });
         }
         return { ok: true, created: createdRecord };
       } catch (err) {
@@ -507,16 +627,78 @@ export default function App() {
     return null;
   };
 
-  const handleReplaceRegistrations = useCallback((next: RegistrationRecord[]) => {
-    setRegistrations(next);
+  const handleStressTestBusyChange = useCallback((busy: boolean) => {
+    stressTestBusyRef.current = busy;
   }, []);
 
+  const handleReplaceRegistrations = useCallback(
+    (next: RegistrationRecord[]) => {
+      applyRegistrationsIfChanged(next, true);
+    },
+    [applyRegistrationsIfChanged]
+  );
+
   const handleClearLocalTestRecords = useCallback(() => {
-    setRegistrations((prev) => prev.filter((r) => !r.isTest));
+    setRegistrations((prev) => {
+      const next = prev.filter((r) => !r.isTest);
+      try {
+        syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
+      } catch {
+        // ignore
+      }
+      return next;
+    });
   }, []);
 
   const handleAppendLocalTestRecords = useCallback((records: RegistrationRecord[]) => {
-    setRegistrations((prev) => [...records.slice().reverse(), ...prev]);
+    setRegistrations((prev) => {
+      const next = [...records.slice().reverse(), ...prev];
+      try {
+        syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const handleApproveLocalTestRecords = useCallback(() => {
+    setRegistrations((prev) => {
+      const caps = getCapacityCounts(prev);
+      const busRem = {
+        bus1: caps.buses.bus1.remaining,
+        bus2: caps.buses.bus2.remaining,
+      };
+      const colorRem = {
+        red: caps.colors.red.remaining,
+        blue: caps.colors.blue.remaining,
+        yellow: caps.colors.yellow.remaining,
+        green: caps.colors.green.remaining,
+      };
+
+      const next = prev.map((reg) => {
+        if (!reg.isTest) return reg;
+        return {
+          ...reg,
+          members: reg.members.map((m) => {
+            if (m.cancelled || m.paid) return m;
+            if (busRem[reg.bus] > 0 && colorRem[reg.colorGroup] > 0) {
+              busRem[reg.bus] -= 1;
+              colorRem[reg.colorGroup] -= 1;
+              return { ...m, paid: true };
+            }
+            return m;
+          }),
+        };
+      });
+
+      try {
+        syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
+      } catch {
+        // ignore
+      }
+      return next;
+    });
   }, []);
 
   return (
@@ -546,6 +728,7 @@ export default function App() {
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 sm:px-6">
         {activeView === 'public' ? (
           <RegistrationView
+            registrations={registrations}
             capacities={capacities}
             whatsappNumbers={whatsappNumbers}
             onAddRegistration={handleAddRegistration}
@@ -562,9 +745,11 @@ export default function App() {
             cloudNotice={cloudNotice}
             onDismissCloudNotice={() => setCloudNotice('')}
             onSyncSheets={() => syncFromSheets()}
+            onStressTestBusyChange={handleStressTestBusyChange}
             onReplaceRegistrations={handleReplaceRegistrations}
             onClearLocalTestRecords={handleClearLocalTestRecords}
             onAppendLocalTestRecords={handleAppendLocalTestRecords}
+            onApproveLocalTestRecords={handleApproveLocalTestRecords}
             onUpdateGoogleScriptUrl={handleUpdateGoogleScriptUrl}
             onUpdateWhatsAppNumbers={setWhatsAppNumbers}
             onToggleMemberPaid={handleToggleMemberPaid}

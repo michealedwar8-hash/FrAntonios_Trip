@@ -2,6 +2,7 @@ import { memo, useState } from 'react';
 import {
   Activity,
   AlertCircle,
+  CheckCheck,
   CheckCircle2,
   Loader2,
   Play,
@@ -19,6 +20,7 @@ import {
 } from '../types/trip';
 import { isValidGoogleScriptUrl } from '../config/sheets';
 import {
+  approveAllTestInSheets,
   clearTestDataInSheets,
   createRegistrationInSheets,
   fetchRegistrationsFromSheets,
@@ -61,51 +63,60 @@ interface IntegrityReport {
 interface AdminStressTestPanelProps {
   googleScriptUrl: string;
   testRowsCount: number;
+  onBusyChange?: (busy: boolean) => void;
   onReplaceRegistrations: (next: RegistrationRecord[]) => void;
   onClearLocalTestRecords: () => void;
   onAppendLocalTestRecords: (records: RegistrationRecord[]) => void;
+  onApproveLocalTestRecords: () => void;
 }
 
 const BUS_CYCLE: BusKey[] = ['bus1', 'bus2'];
 const COLOR_CYCLE: ColorGroupKey[] = ['red', 'blue', 'yellow', 'green'];
 const PAYMENT_CYCLE: PaymentMethodKey[] = ['instapay', 'orange', 'vf'];
 
-function buildTestPhone(index: number): string {
-  // Always produces a valid 10-digit Egyptian mobile number after +20
-  // e.g. 1 -> +201000000001, 50 -> +201000000050, 100 -> +201000000100
-  const suffix = String(index).padStart(8, '0');
+function buildTestPhone(uniqueNumber: number): string {
+  // Always produces a unique valid 10-digit Egyptian mobile number after +20
+  const suffix = String(uniqueNumber).padStart(8, '0').slice(-8);
   return `+2010${suffix}`;
 }
 
 export const AdminStressTestPanel = memo(function AdminStressTestPanel({
   googleScriptUrl,
   testRowsCount,
+  onBusyChange,
   onReplaceRegistrations,
   onClearLocalTestRecords,
   onAppendLocalTestRecords,
+  onApproveLocalTestRecords,
 }: AdminStressTestPanelProps) {
   const [concurrentCount, setConcurrentCount] = useState<number>(50);
   const [isRunning, setIsRunning] = useState(false);
+  const [isApprovingTests, setIsApprovingTests] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [counters, setCounters] = useState<LiveCounters | null>(null);
   const [report, setReport] = useState<IntegrityReport | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const isCloudConnected = isValidGoogleScriptUrl(googleScriptUrl);
+  const isBusy = isRunning || isApprovingTests || isClearing;
 
   const handleRunStressTest = async () => {
-    if (isRunning || isClearing) return;
+    if (isBusy) return;
     const count = Math.max(1, Math.min(100, Math.floor(concurrentCount) || 50));
     setConcurrentCount(count);
     setIsRunning(true);
+    onBusyChange?.(true);
     setReport(null);
     setStatusMessage(null);
 
     const batchId = Date.now().toString(36);
     const startTime = performance.now();
+    // Ensure names and phones remain unique even across consecutive stress test batches
+    const seqOffset = testRowsCount;
+    const phoneBase = (Date.now() % 800000) * 100;
 
     const specs: StressTestSpec[] = Array.from({ length: count }, (_, idx) => {
-      const i = idx + 1;
+      const i = seqOffset + idx + 1;
       const bus = BUS_CYCLE[idx % BUS_CYCLE.length];
       const colorGroup = COLOR_CYCLE[idx % COLOR_CYCLE.length];
       const paymentMethod = PAYMENT_CYCLE[idx % PAYMENT_CYCLE.length];
@@ -113,9 +124,9 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
 
       return {
         index: i,
-        requestId: `test_${batchId}_${i}`,
+        requestId: `test_${batchId}_${idx + 1}`,
         name: `اختبار ضغط رقم${i}`,
-        phone: buildTestPhone(i),
+        phone: buildTestPhone(phoneBase + idx + 1),
         bus,
         colorGroup,
         paymentMethod,
@@ -177,6 +188,7 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
         ],
       });
       setIsRunning(false);
+      onBusyChange?.(false);
       return;
     }
 
@@ -343,12 +355,71 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
       });
     } finally {
       setIsRunning(false);
+      onBusyChange?.(false);
+    }
+  };
+
+  const handleApproveAllTest = async () => {
+    if (isBusy || testRowsCount === 0) return;
+    setIsApprovingTests(true);
+    onBusyChange?.(true);
+    setStatusMessage(null);
+
+    try {
+      if (!isCloudConnected) {
+        onApproveLocalTestRecords();
+        setStatusMessage({
+          ok: true,
+          text: 'تم تأكيد دفع سجلات الاختبار محلياً وحسابها ضمن السعة الفعلية والحسابات.',
+        });
+        return;
+      }
+
+      const res = await approveAllTestInSheets(googleScriptUrl, ADMIN_STRESS_SECRET);
+      if (!res.ok && !res.success) {
+        const rawErr = res.error || 'تعذر تأكيد دفع سجلات الاختبار في Google Sheets.';
+        setStatusMessage({
+          ok: false,
+          text: rawErr.includes('عملية غير معروفة')
+            ? 'يرجى تحديث كود Google Apps Script ونشر إصدار جديد (New version) لتفعيل تأكيد دفع سجلات الاختبار دفعة واحدة.'
+            : rawErr,
+        });
+        return;
+      }
+
+      if (Array.isArray(res.registrations)) {
+        onReplaceRegistrations(res.registrations);
+      } else {
+        const fresh = await fetchRegistrationsFromSheets(googleScriptUrl, 'adminData');
+        if (fresh.ok && Array.isArray(fresh.registrations)) {
+          onReplaceRegistrations(fresh.registrations);
+        }
+      }
+
+      const approvedCount = res.approvedCount ?? 0;
+      const skippedCount = res.skippedCount ?? 0;
+      setStatusMessage({
+        ok: true,
+        text:
+          skippedCount > 0
+            ? `تم تأكيد دفع ${approvedCount} فرد من سجلات الاختبار (وتم إيقاف ${skippedCount} بسبب اكتمال سعة الباص أو القروب).`
+            : `تم تأكيد دفع ${approvedCount} فرد من سجلات الاختبار وإضافتهم للحسابات والسعة الفعلية.`,
+      });
+    } catch (err) {
+      setStatusMessage({
+        ok: false,
+        text: err instanceof Error ? err.message : 'حدث خطأ أثناء تأكيد دفع سجلات الاختبار.',
+      });
+    } finally {
+      setIsApprovingTests(false);
+      onBusyChange?.(false);
     }
   };
 
   const handleClearTestData = async () => {
-    if (isRunning || isClearing) return;
+    if (isBusy) return;
     setIsClearing(true);
+    onBusyChange?.(true);
     setStatusMessage(null);
 
     try {
@@ -397,6 +468,7 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
       });
     } finally {
       setIsClearing(false);
+      onBusyChange?.(false);
     }
   };
 
@@ -416,8 +488,8 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
             )}
           </div>
           <p className="mt-1 text-xs text-[#6B6155]">
-            محاكاة تسجيل عشرات الأشخاص في نفس اللحظة مع فحص سلامة البيانات تلقائياً (صفر تكرار ·
-            صفر خلط بيانات · تسلسل الطابور #seqNo)، مع تنظيف فوري لسجلات الاختبار دون لمس الحجوزات
+            محاكاة تسجيل عشرات الأشخاص في نفس اللحظة مع احتسابها فعلياً في المقاعد والحسابات عند
+            تأكيد الدفع لاختبار امتلاء الباصات والألوان، ثم تنظيفها بضغطة واحدة دون لمس الحجوزات
             الحقيقية.
           </p>
         </div>
@@ -432,7 +504,7 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
               type="number"
               min={1}
               max={100}
-              disabled={isRunning || isClearing}
+              disabled={isBusy}
               value={concurrentCount}
               onChange={(e) => setConcurrentCount(Number(e.target.value))}
               className="w-16 rounded border border-[#D4CBBF] bg-white px-2 py-1 text-center font-mono-num text-xs font-bold text-[#1E1A16] focus:border-[#9A5B25] focus:outline-none"
@@ -441,7 +513,7 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
 
           <button
             type="button"
-            disabled={isRunning || isClearing}
+            disabled={isBusy}
             onClick={handleRunStressTest}
             className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-[#1E1A16] px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-[#3A3229] disabled:opacity-60 whitespace-nowrap cursor-pointer"
           >
@@ -457,9 +529,27 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
             </span>
           </button>
 
+          {testRowsCount > 0 && (
+            <button
+              type="button"
+              disabled={isBusy}
+              onClick={handleApproveAllTest}
+              className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-emerald-800 disabled:opacity-60 whitespace-nowrap cursor-pointer"
+            >
+              {isApprovingTests ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCheck className="h-4 w-4" />
+              )}
+              <span>
+                {isApprovingTests ? 'جارٍ تأكيد الدفع...' : 'تأكيد دفع سجلات الاختبار'}
+              </span>
+            </button>
+          )}
+
           <button
             type="button"
-            disabled={isRunning || isClearing}
+            disabled={isBusy}
             onClick={handleClearTestData}
             className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-red-700 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-red-800 disabled:opacity-60 whitespace-nowrap cursor-pointer"
           >

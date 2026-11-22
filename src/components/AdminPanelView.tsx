@@ -38,8 +38,9 @@ import {
   exportRegistrationsToCSV,
   exportRegistrationsToExcel,
   getDuplicateNameCounts,
+  getDuplicatePhoneCounts,
   getRegSummary,
-  hasDuplicateMemberName,
+  hasDuplicateMemberInfo,
   matchesRegistrationSearch,
   normalizeDigits,
   type CapacityCounts,
@@ -66,9 +67,11 @@ interface AdminPanelViewProps {
   cloudNotice: string;
   onDismissCloudNotice: () => void;
   onSyncSheets: () => Promise<string | null>;
+  onStressTestBusyChange?: (busy: boolean) => void;
   onReplaceRegistrations: (next: RegistrationRecord[]) => void;
   onClearLocalTestRecords: () => void;
   onAppendLocalTestRecords: (records: RegistrationRecord[]) => void;
+  onApproveLocalTestRecords: () => void;
   onUpdateGoogleScriptUrl: (nextUrl: string) => Promise<string | null>;
   onUpdateWhatsAppNumbers: (next: WhatsAppConfig) => void;
   onToggleMemberPaid: (regId: number, memberId: string) => string | null;
@@ -92,9 +95,11 @@ export function AdminPanelView({
   cloudNotice,
   onDismissCloudNotice,
   onSyncSheets,
+  onStressTestBusyChange,
   onReplaceRegistrations,
   onClearLocalTestRecords,
   onAppendLocalTestRecords,
+  onApproveLocalTestRecords,
   onUpdateGoogleScriptUrl,
   onUpdateWhatsAppNumbers,
   onToggleMemberPaid,
@@ -156,32 +161,43 @@ export function AdminPanelView({
     [registrations]
   );
 
+  const duplicatePhoneCounts = useMemo(
+    () => getDuplicatePhoneCounts(registrations),
+    [registrations]
+  );
+
   const duplicateStats = useMemo(() => {
     let uniqueDuplicateNames = 0;
-    let totalDuplicateOccurrences = 0;
     duplicateNameCounts.forEach((count) => {
-      if (count > 1) {
-        uniqueDuplicateNames++;
-        totalDuplicateOccurrences += count;
-      }
+      if (count > 1) uniqueDuplicateNames++;
     });
-    const duplicateBookingsCount =
-      uniqueDuplicateNames === 0
-        ? 0
-        : registrations.filter((reg) => hasDuplicateMemberName(reg, duplicateNameCounts)).length;
+
+    let uniqueDuplicatePhones = 0;
+    duplicatePhoneCounts.forEach((count) => {
+      if (count > 1) uniqueDuplicatePhones++;
+    });
+
+    const hasAnyDuplicates = uniqueDuplicateNames > 0 || uniqueDuplicatePhones > 0;
+    const duplicateBookingsCount = !hasAnyDuplicates
+      ? 0
+      : registrations.filter((reg) =>
+          hasDuplicateMemberInfo(reg, duplicateNameCounts, duplicatePhoneCounts)
+        ).length;
+
     return {
       uniqueDuplicateNames,
-      totalDuplicateOccurrences,
+      uniqueDuplicatePhones,
+      hasAnyDuplicates,
       duplicateBookingsCount,
     };
-  }, [registrations, duplicateNameCounts]);
+  }, [registrations, duplicateNameCounts, duplicatePhoneCounts]);
 
   // Turn off duplicates-only filter automatically once all duplicates have been cleaned up
   useEffect(() => {
-    if (onlyDuplicates && duplicateStats.uniqueDuplicateNames === 0) {
+    if (onlyDuplicates && !duplicateStats.hasAnyDuplicates) {
       setOnlyDuplicates(false);
     }
-  }, [onlyDuplicates, duplicateStats.uniqueDuplicateNames]);
+  }, [onlyDuplicates, duplicateStats.hasAnyDuplicates]);
 
   const filteredRegistrations = useMemo(() => {
     return registrations.filter((reg) => {
@@ -189,7 +205,9 @@ export function AdminPanelView({
       const matchPay = filterPayment === 'all' || reg.paymentMethod === filterPayment;
       const summary = getRegSummary(reg);
       const matchStatus = filterStatus === 'all' || summary.statusKey === filterStatus;
-      const matchDup = !onlyDuplicates || hasDuplicateMemberName(reg, duplicateNameCounts);
+      const matchDup =
+        !onlyDuplicates ||
+        hasDuplicateMemberInfo(reg, duplicateNameCounts, duplicatePhoneCounts);
       const matchSearch = matchesRegistrationSearch(reg, deferredSearchQuery);
       return matchRec && matchPay && matchStatus && matchDup && matchSearch;
     });
@@ -200,6 +218,7 @@ export function AdminPanelView({
     filterStatus,
     onlyDuplicates,
     duplicateNameCounts,
+    duplicatePhoneCounts,
     deferredSearchQuery,
   ]);
 
@@ -279,8 +298,8 @@ export function AdminPanelView({
     [runInstantAction, onDeleteRegistration]
   );
 
-  const handleQuickFilterName = useCallback((name: string) => {
-    setSearchQuery(name);
+  const handleQuickFilterText = useCallback((query: string) => {
+    setSearchQuery(query);
     setFilterRecipient('all');
     setFilterPayment('all');
     setFilterStatus('all');
@@ -449,9 +468,11 @@ export function AdminPanelView({
       <AdminStressTestPanel
         googleScriptUrl={googleScriptUrl}
         testRowsCount={testRowsCount}
+        onBusyChange={onStressTestBusyChange}
         onReplaceRegistrations={onReplaceRegistrations}
         onClearLocalTestRecords={onClearLocalTestRecords}
         onAppendLocalTestRecords={onAppendLocalTestRecords}
+        onApproveLocalTestRecords={onApproveLocalTestRecords}
       />
 
       {/* Organizer Settings (Google Sheets URL + WhatsApp Numbers + Secret PIN) */}
@@ -629,8 +650,8 @@ export function AdminPanelView({
       {/* Memoized Live Confirmed Capacity Board */}
       <AdminCapacityBoard capacities={capacities} />
 
-      {/* Duplicate Names Alert Banner (only shown when duplicates exist) */}
-      {duplicateStats.uniqueDuplicateNames > 0 && (
+      {/* Duplicate Names / Phones Alert Banner (only shown when duplicates exist) */}
+      {duplicateStats.hasAnyDuplicates && (
         <div
           role="alert"
           className="flex flex-col gap-3 rounded-xl border-2 border-red-400 bg-red-50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
@@ -639,13 +660,27 @@ export function AdminPanelView({
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-700" />
             <div>
               <p className="font-display text-sm font-extrabold text-red-900">
-                تنبيه: تم اكتشاف {duplicateStats.uniqueDuplicateNames}{' '}
-                {duplicateStats.uniqueDuplicateNames === 1 ? 'اسم مكرر' : 'أسماء مكررة'} في قائمة
-                المسجلين (إجمالي {duplicateStats.totalDuplicateOccurrences} سجل مكرر)
+                تنبيه تكرار:{' '}
+                {[
+                  duplicateStats.uniqueDuplicateNames > 0
+                    ? `${duplicateStats.uniqueDuplicateNames} ${
+                        duplicateStats.uniqueDuplicateNames === 1 ? 'اسم مكرر' : 'أسماء مكررة'
+                      }`
+                    : '',
+                  duplicateStats.uniqueDuplicatePhones > 0
+                    ? `${duplicateStats.uniqueDuplicatePhones} ${
+                        duplicateStats.uniqueDuplicatePhones === 1
+                          ? 'رقم هاتف مكرر'
+                          : 'أرقام هواتف مكررة'
+                      }`
+                    : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
               </p>
               <p className="mt-0.5 text-xs text-red-800">
-                تم تمييز كل الأسماء المكررة باللون الأحمر في الجدول أدناه. اضغط على شارة «اسم مكرر»
-                بجانب أي اسم لمقارنة التكرارات، أو اضغط الزر لعرض الأسماء المكررة فقط وحذف الزائد.
+                تم تمييز كل الأسماء وأرقام الهواتف المكررة باللون الأحمر في الجدول أدناه. اضغط على
+                شارة «اسم مكرر» أو «رقم مكرر» لعرض كل النسخ معاً وحذف الزائد.
               </p>
             </div>
           </div>
@@ -672,7 +707,7 @@ export function AdminPanelView({
             <span>
               {onlyDuplicates
                 ? 'عرض جميع المسجلين'
-                : `عرض الأسماء المكررة فقط (${duplicateStats.duplicateBookingsCount})`}
+                : `عرض التكرارات فقط (${duplicateStats.duplicateBookingsCount})`}
             </span>
           </button>
         </div>
@@ -839,9 +874,10 @@ export function AdminPanelView({
                       key={reg.id}
                       reg={reg}
                       duplicateNameCounts={duplicateNameCounts}
+                      duplicatePhoneCounts={duplicatePhoneCounts}
                       confirmDeleteKey={confirmDeleteKey}
                       onSetConfirmDeleteKey={setConfirmDeleteKey}
-                      onQuickFilterName={handleQuickFilterName}
+                      onQuickFilterText={handleQuickFilterText}
                       onToggleMemberPaid={handleTogglePaidCb}
                       onToggleMemberCancelled={handleToggleCancelledCb}
                       onApproveAllInReg={handleApproveAllCb}

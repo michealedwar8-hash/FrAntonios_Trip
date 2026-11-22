@@ -192,7 +192,6 @@ export function getCapacityCounts(registrations: RegistrationRecord[]): Capacity
   const colorPending: Record<ColorGroupKey, number> = { red: 0, blue: 0, yellow: 0, green: 0 };
 
   for (const reg of registrations) {
-    if (reg.isTest) continue;
     for (const member of reg.members) {
       if (member.cancelled) continue;
       if (member.paid) {
@@ -272,7 +271,6 @@ export function calculateFinancialStats(
   };
 
   for (const r of list) {
-    if (r.isTest) continue;
     const s = getRegSummary(r);
     stats.expectedMoney += s.expectedMoney;
     stats.paidMoney += s.paidMoney;
@@ -428,8 +426,42 @@ export function normalizeArabicText(value: string): string {
 }
 
 /**
- * Counts occurrences of each normalized member name across all real (non-test)
- * registrations, returning a Map of normalizedName -> occurrence count (> 1 means duplicate).
+ * Normalizes any Egyptian phone representation (+2010..., 2010..., 010..., 10...)
+ * into its canonical 10-digit local key (e.g. 1012345678) for accurate duplicate detection.
+ */
+export function normalizePhoneKey(phone: string): string {
+  const digits = normalizeDigits(phone);
+  if (!digits) return '';
+  return digits.replace(/^20/, '').replace(/^0/, '');
+}
+
+/**
+ * Builds fast lookup Sets of normalized names and canonical phones across all
+ * active (non-cancelled) members in existing registrations.
+ */
+export function getActiveExistingSets(registrations: RegistrationRecord[]): {
+  names: Set<string>;
+  phones: Set<string>;
+} {
+  const names = new Set<string>();
+  const phones = new Set<string>();
+
+  for (const reg of registrations) {
+    for (const member of reg.members) {
+      if (member.cancelled) continue;
+      const nameKey = normalizeArabicText(member.name);
+      if (nameKey) names.add(nameKey);
+      const phoneKey = normalizePhoneKey(member.phone);
+      if (phoneKey) phones.add(phoneKey);
+    }
+  }
+
+  return { names, phones };
+}
+
+/**
+ * Counts occurrences of each normalized member name across all registrations,
+ * returning a Map of normalizedName -> occurrence count (> 1 means duplicate).
  */
 export function getDuplicateNameCounts(
   registrations: RegistrationRecord[]
@@ -437,7 +469,6 @@ export function getDuplicateNameCounts(
   const counts = new Map<string, number>();
 
   for (const reg of registrations) {
-    if (reg.isTest) continue;
     for (const member of reg.members) {
       const key = normalizeArabicText(member.name);
       if (!key) continue;
@@ -449,17 +480,41 @@ export function getDuplicateNameCounts(
 }
 
 /**
- * Returns true if any member inside a non-test registration shares a normalized name
- * with at least one other member across the registrations list.
+ * Counts occurrences of each canonical member phone across all registrations,
+ * returning a Map of phoneKey -> occurrence count (> 1 means duplicate).
  */
-export function hasDuplicateMemberName(
+export function getDuplicatePhoneCounts(
+  registrations: RegistrationRecord[]
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const reg of registrations) {
+    for (const member of reg.members) {
+      const key = normalizePhoneKey(member.phone);
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+
+  return counts;
+}
+
+/**
+ * Returns true if any member inside a registration shares a normalized name
+ * or phone number with at least one other member across the registrations list.
+ */
+export function hasDuplicateMemberInfo(
   reg: RegistrationRecord,
-  duplicateNameCounts: Map<string, number>
+  duplicateNameCounts: Map<string, number>,
+  duplicatePhoneCounts: Map<string, number>
 ): boolean {
-  if (reg.isTest) return false;
   return reg.members.some((member) => {
-    const key = normalizeArabicText(member.name);
-    return key !== '' && (duplicateNameCounts.get(key) ?? 0) > 1;
+    const nameKey = normalizeArabicText(member.name);
+    const phoneKey = normalizePhoneKey(member.phone);
+    return (
+      (nameKey !== '' && (duplicateNameCounts.get(nameKey) ?? 0) > 1) ||
+      (phoneKey !== '' && (duplicatePhoneCounts.get(phoneKey) ?? 0) > 1)
+    );
   });
 }
 

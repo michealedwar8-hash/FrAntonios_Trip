@@ -12,6 +12,7 @@ import {
 import {
   getRegSummary,
   normalizeArabicText,
+  normalizePhoneKey,
   type CapacityCounts,
   type FinancialStats,
 } from '../utils/validation';
@@ -179,9 +180,10 @@ export const AdminCapacityBoard = memo(function AdminCapacityBoard({
 interface RegistrationTableRowProps {
   reg: RegistrationRecord;
   duplicateNameCounts: Map<string, number>;
+  duplicatePhoneCounts: Map<string, number>;
   confirmDeleteKey: string | null;
   onSetConfirmDeleteKey: (key: string | null) => void;
-  onQuickFilterName: (name: string) => void;
+  onQuickFilterText: (query: string) => void;
   onToggleMemberPaid: (regId: number, memberId: string) => void;
   onToggleMemberCancelled: (regId: number, memberId: string) => void;
   onApproveAllInReg: (regId: number) => void;
@@ -193,9 +195,10 @@ interface RegistrationTableRowProps {
 export const RegistrationTableRow = memo(function RegistrationTableRow({
   reg,
   duplicateNameCounts,
+  duplicatePhoneCounts,
   confirmDeleteKey,
   onSetConfirmDeleteKey,
-  onQuickFilterName,
+  onQuickFilterText,
   onToggleMemberPaid,
   onToggleMemberCancelled,
   onApproveAllInReg,
@@ -207,12 +210,14 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
   const allCancelled = summary.activeCount === 0;
   const colorMeta = COLOR_GROUP_LIST.find((c) => c.key === reg.colorGroup);
 
-  const rowHasDuplicate =
-    !reg.isTest &&
-    reg.members.some((m) => {
-      const key = normalizeArabicText(m.name);
-      return key !== '' && (duplicateNameCounts.get(key) ?? 0) > 1;
-    });
+  const rowHasDuplicate = reg.members.some((m) => {
+    const nameKey = normalizeArabicText(m.name);
+    const phoneKey = normalizePhoneKey(m.phone);
+    return (
+      (nameKey !== '' && (duplicateNameCounts.get(nameKey) ?? 0) > 1) ||
+      (phoneKey !== '' && (duplicatePhoneCounts.get(phoneKey) ?? 0) > 1)
+    );
+  });
 
   return (
     <tr
@@ -247,15 +252,19 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
           {reg.members.map((m) => {
             const delMemberKey = `del_member_${reg.id}_${m.id}`;
             const isConfirmingMemberDelete = confirmDeleteKey === delMemberKey;
-            const normKey = !reg.isTest ? normalizeArabicText(m.name) : '';
-            const duplicateCount = normKey ? (duplicateNameCounts.get(normKey) ?? 0) : 0;
-            const isDuplicateName = duplicateCount > 1;
+            const normNameKey = normalizeArabicText(m.name);
+            const normPhoneKey = normalizePhoneKey(m.phone);
+            const nameDupCount = normNameKey ? (duplicateNameCounts.get(normNameKey) ?? 0) : 0;
+            const phoneDupCount = normPhoneKey ? (duplicatePhoneCounts.get(normPhoneKey) ?? 0) : 0;
+            const isDuplicateName = nameDupCount > 1;
+            const isDuplicatePhone = phoneDupCount > 1;
+            const isMemberDuplicate = isDuplicateName || isDuplicatePhone;
 
             return (
               <div
                 key={m.id}
                 className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${
-                  isDuplicateName
+                  isMemberDuplicate
                     ? 'border-red-500 bg-red-100/75 ring-1 ring-red-300'
                     : m.cancelled
                       ? 'border-red-200 bg-red-50/60 opacity-90'
@@ -285,19 +294,37 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
                     {isDuplicateName && (
                       <button
                         type="button"
-                        onClick={() => onQuickFilterName(m.name)}
+                        onClick={() => onQuickFilterText(m.name)}
                         title="اضغط لعرض كل الحجوزات التي تحمل هذا الاسم ومقارنتها"
                         className="inline-flex items-center gap-1 rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white transition-colors hover:bg-red-700 whitespace-nowrap cursor-pointer"
                       >
                         <AlertTriangle className="h-3 w-3 shrink-0" />
-                        <span>اسم مكرر (×{duplicateCount})</span>
+                        <span>اسم مكرر (×{nameDupCount})</span>
                       </button>
                     )}
                   </div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-[#5C5349]">
-                    <span className="font-mono-num" dir="ltr">
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#5C5349]">
+                    <span
+                      className={`font-mono-num ${
+                        isDuplicatePhone
+                          ? 'rounded bg-red-200/90 px-1.5 py-0.5 font-extrabold text-red-950'
+                          : ''
+                      }`}
+                      dir="ltr"
+                    >
                       {m.phone}
                     </span>
+                    {isDuplicatePhone && (
+                      <button
+                        type="button"
+                        onClick={() => onQuickFilterText(m.phone)}
+                        title="اضغط لعرض كل الحجوزات التي تحمل هذا الرقم ومقارنتها"
+                        className="inline-flex items-center gap-1 rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white transition-colors hover:bg-red-700 whitespace-nowrap cursor-pointer"
+                      >
+                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                        <span>رقم مكرر (×{phoneDupCount})</span>
+                      </button>
+                    )}
                     <span aria-hidden="true">·</span>
                     <span
                       className={`font-bold ${

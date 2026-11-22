@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   AlertCircle,
   ArrowDown,
@@ -31,7 +31,10 @@ import {
 import {
   buildWhatsAppDetails,
   formatEgyptianPhone,
+  getActiveExistingSets,
+  normalizeArabicText,
   normalizeDigits,
+  normalizePhoneKey,
   validateEgyptianPhone,
   validateTripleName,
   type CapacityCounts,
@@ -67,6 +70,7 @@ export interface SubmitBookingResult {
 }
 
 interface RegistrationViewProps {
+  registrations: RegistrationRecord[];
   capacities: CapacityCounts;
   whatsappNumbers: WhatsAppConfig;
   onAddRegistration: (
@@ -77,6 +81,7 @@ interface RegistrationViewProps {
 }
 
 export function RegistrationView({
+  registrations,
   capacities,
   whatsappNumbers,
   onAddRegistration,
@@ -131,17 +136,72 @@ export function RegistrationView({
   useEffect(() => {
     if (colorGroup && capacities.colors[colorGroup].isFull) {
       setColorGroup('');
-      setColorClickedFull('القروب اكتمل — يرجى اختيار قروب لوني آخر متاح');
+      setColorClickedFull('القروب اتملا — يرجى اختيار قروب لوني آخر متاح');
     }
   }, [capacities.colors, colorGroup]);
 
   useEffect(() => {
     if (formError) setFormError('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalPersons, busChoice, colorGroup, paymentMethod]);
+  }, [totalPersons, busChoice, colorGroup, paymentMethod, fullName, phoneDigits, companions]);
 
-  const mainNameCheck = validateTripleName(fullName);
-  const mainPhoneCheck = validateEgyptianPhone(phoneDigits);
+  const existingActiveSets = useMemo(
+    () => getActiveExistingSets(registrations),
+    [registrations]
+  );
+
+  // Track duplicates within the current form (main attendee + companions in group mode)
+  const intraFormCounts = useMemo(() => {
+    const names = new Map<string, number>();
+    const phones = new Map<string, number>();
+
+    const mainNameKey = normalizeArabicText(fullName);
+    if (mainNameKey) names.set(mainNameKey, (names.get(mainNameKey) ?? 0) + 1);
+    const mainPhoneKey = normalizePhoneKey(phoneDigits);
+    if (mainPhoneKey) phones.set(mainPhoneKey, (phones.get(mainPhoneKey) ?? 0) + 1);
+
+    if (regType === 'group') {
+      for (const comp of companions) {
+        const cNameKey = normalizeArabicText(comp.name);
+        if (cNameKey) names.set(cNameKey, (names.get(cNameKey) ?? 0) + 1);
+        const cPhoneKey = normalizePhoneKey(comp.phone);
+        if (cPhoneKey) phones.set(cPhoneKey, (phones.get(cPhoneKey) ?? 0) + 1);
+      }
+    }
+
+    return { names, phones };
+  }, [fullName, phoneDigits, regType, companions]);
+
+  const getMemberNameError = (rawName: string): string => {
+    const base = validateTripleName(rawName);
+    if (!base.valid) return base.message;
+    const key = normalizeArabicText(rawName);
+    if (key && existingActiveSets.names.has(key)) {
+      return 'تم تسجيل هذا الاسم من قبل — الاسم ده موجود بالفعل';
+    }
+    if (regType === 'group' && key && (intraFormCounts.names.get(key) ?? 0) > 1) {
+      return 'الاسم مكرر داخل نفس الحجز — يجب كتابة اسم مختلف لكل شخص';
+    }
+    return '';
+  };
+
+  const getMemberPhoneError = (rawPhone: string): string => {
+    const base = validateEgyptianPhone(rawPhone);
+    if (!base.valid) return base.message;
+    const key = normalizePhoneKey(rawPhone);
+    if (key && existingActiveSets.phones.has(key)) {
+      return 'الرقم ده متسجل وموجود بالفعل — يرجى إدخال رقم هاتف مختلف';
+    }
+    if (regType === 'group' && key && (intraFormCounts.phones.get(key) ?? 0) > 1) {
+      return 'الرقم ده متسجل وموجود لمشارك آخر في نفس الحجز — يجب أن يكتب كل مرافق رقمه الخاص';
+    }
+    return '';
+  };
+
+  const mainNameError = getMemberNameError(fullName);
+  const mainNameValid = mainNameError === '';
+  const mainPhoneError = getMemberPhoneError(phoneDigits);
+  const mainPhoneValid = mainPhoneError === '';
 
   const selectedBusStat = busChoice ? capacities.buses[busChoice] : null;
   const selectedBusInsufficient = Boolean(
@@ -191,7 +251,7 @@ export function RegistrationView({
   const handleSelectColor = (key: ColorGroupKey) => {
     const stat = capacities.colors[key];
     if (stat.isFull) {
-      setColorClickedFull('القروب اكتمل');
+      setColorClickedFull('القروب اتملا');
       return;
     }
     setColorClickedFull('');
@@ -226,27 +286,27 @@ export function RegistrationView({
     setSubmitAttempted(true);
     setFormError('');
 
-    if (!mainNameCheck.valid) {
-      setFormError(mainNameCheck.message);
+    if (!mainNameValid) {
+      setFormError(mainNameError);
       return;
     }
 
-    if (!mainPhoneCheck.valid) {
-      setFormError(mainPhoneCheck.message);
+    if (!mainPhoneValid) {
+      setFormError(mainPhoneError);
       return;
     }
 
     if (regType === 'group') {
       for (let i = 0; i < companions.length; i++) {
         const comp = companions[i];
-        const cNameCheck = validateTripleName(comp.name);
-        if (!cNameCheck.valid) {
-          setFormError(`المرافق ${i + 1}: ${cNameCheck.message}`);
+        const cNameErr = getMemberNameError(comp.name);
+        if (cNameErr) {
+          setFormError(`المرافق ${i + 1}: ${cNameErr}`);
           return;
         }
-        const cPhoneCheck = validateEgyptianPhone(comp.phone);
-        if (!cPhoneCheck.valid) {
-          setFormError(`المرافق ${i + 1}: ${cPhoneCheck.message}`);
+        const cPhoneErr = getMemberPhoneError(comp.phone);
+        if (cPhoneErr) {
+          setFormError(`المرافق ${i + 1}: ${cPhoneErr}`);
           return;
         }
       }
@@ -277,8 +337,8 @@ export function RegistrationView({
 
     const colorStat = capacities.colors[colorGroup];
     if (colorStat.isFull) {
-      setColorClickedFull('القروب اكتمل');
-      setFormError('القروب اكتمل — لا يمكن إتمام التسجيل في هذا القروب');
+      setColorClickedFull('القروب اتملا');
+      setFormError('القروب اتملا — لا يمكن إتمام التسجيل في هذا القروب');
       return;
     }
     if (totalPersons > colorStat.remaining) {
@@ -629,22 +689,22 @@ export function RegistrationView({
                     }}
                     onBlur={() => setNameTouched(true)}
                     placeholder="مثال: مينا جرجس بولس"
-                    aria-invalid={(nameTouched || submitAttempted) && !mainNameCheck.valid}
+                    aria-invalid={(nameTouched || submitAttempted) && !mainNameValid}
                     className={`w-full rounded-lg border px-3.5 py-2.5 text-sm text-[#1E1A16] transition-colors focus:outline-none ${
-                      (nameTouched || submitAttempted) && !mainNameCheck.valid
+                      (nameTouched || submitAttempted) && !mainNameValid
                         ? 'border-red-500 bg-red-50/40 focus:border-red-600'
-                        : nameTouched && mainNameCheck.valid
+                        : nameTouched && mainNameValid
                           ? 'border-emerald-600 bg-emerald-50/20 focus:border-emerald-700'
                           : 'border-[#D4CBBF] bg-white focus:border-[#9A5B25]'
                     }`}
                   />
-                  {(nameTouched || submitAttempted) && !mainNameCheck.valid && (
-                    <p className="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-red-700">
+                  {(nameTouched || submitAttempted) && !mainNameValid && (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-xs font-semibold text-red-700">
                       <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>{mainNameCheck.message}</span>
+                      <span>{mainNameError}</span>
                     </p>
                   )}
-                  {nameTouched && mainNameCheck.valid && (
+                  {nameTouched && mainNameValid && (
                     <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-emerald-700">
                       <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                       <span>الاسم الثلاثي صحيح</span>
@@ -662,9 +722,9 @@ export function RegistrationView({
                   <div
                     dir="ltr"
                     className={`flex items-stretch overflow-hidden rounded-lg border transition-colors ${
-                      (phoneTouched || submitAttempted) && !mainPhoneCheck.valid
+                      (phoneTouched || submitAttempted) && !mainPhoneValid
                         ? 'border-red-500 bg-red-50/40 focus-within:border-red-600'
-                        : phoneTouched && mainPhoneCheck.valid
+                        : phoneTouched && mainPhoneValid
                           ? 'border-emerald-600 bg-emerald-50/20 focus-within:border-emerald-700'
                           : 'border-[#D4CBBF] bg-white focus-within:border-[#9A5B25]'
                     }`}
@@ -684,18 +744,18 @@ export function RegistrationView({
                       }}
                       onBlur={() => setPhoneTouched(true)}
                       placeholder="10xxxxxxxx"
-                      aria-invalid={(phoneTouched || submitAttempted) && !mainPhoneCheck.valid}
+                      aria-invalid={(phoneTouched || submitAttempted) && !mainPhoneValid}
                       className="w-full bg-transparent px-3.5 py-2.5 font-mono-num text-sm text-[#1E1A16] focus:outline-none"
                     />
                   </div>
                   <div className="mt-1.5 flex items-start justify-between gap-2">
                     <div className="flex-1">
-                      {(phoneTouched || submitAttempted) && !mainPhoneCheck.valid ? (
-                        <p className="flex items-start gap-1.5 text-xs font-medium text-red-700">
+                      {(phoneTouched || submitAttempted) && !mainPhoneValid ? (
+                        <p className="flex items-start gap-1.5 text-xs font-semibold text-red-700">
                           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                          <span>{mainPhoneCheck.message}</span>
+                          <span>{mainPhoneError}</span>
                         </p>
-                      ) : phoneTouched && mainPhoneCheck.valid ? (
+                      ) : phoneTouched && mainPhoneValid ? (
                         <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-700">
                           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                           <span>
@@ -798,13 +858,22 @@ export function RegistrationView({
                     </div>
                   </div>
 
+                  <div className="mt-3.5 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs font-bold text-amber-900">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                    <span>
+                      تنبيه هام: يجب على كل مرافق كتابة رقم هاتفه الخاص به — لا يُسمح بتكرار نفس
+                      الاسم أو نفس رقم الهاتف لأكثر من شخص.
+                    </span>
+                  </div>
+
                   <div className="mt-5 divide-y divide-[#E4DDD2]">
                     {companions.map((comp, idx) => {
-                      const cNameCheck = validateTripleName(comp.name);
-                      const cPhoneCheck = validateEgyptianPhone(comp.phone);
-                      const showNameErr = (comp.nameTouched || submitAttempted) && !cNameCheck.valid;
-                      const showPhoneErr =
-                        (comp.phoneTouched || submitAttempted) && !cPhoneCheck.valid;
+                      const cNameErr = getMemberNameError(comp.name);
+                      const cPhoneErr = getMemberPhoneError(comp.phone);
+                      const cNameValid = cNameErr === '';
+                      const cPhoneValid = cPhoneErr === '';
+                      const showNameErr = (comp.nameTouched || submitAttempted) && !cNameValid;
+                      const showPhoneErr = (comp.phoneTouched || submitAttempted) && !cPhoneValid;
 
                       return (
                         <div key={comp.keyId} className={idx === 0 ? 'pb-5' : 'py-5'}>
@@ -841,29 +910,30 @@ export function RegistrationView({
                                 placeholder="مثال: بيشوي مجدي حنا"
                                 className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-[#1E1A16] focus:outline-none ${
                                   showNameErr
-                                    ? 'border-red-500'
-                                    : comp.nameTouched && cNameCheck.valid
+                                    ? 'border-red-500 bg-red-50/40'
+                                    : comp.nameTouched && cNameValid
                                       ? 'border-emerald-600'
                                       : 'border-[#D4CBBF] focus:border-[#9A5B25]'
                                 }`}
                               />
                               {showNameErr && (
-                                <p className="mt-1 text-xs font-medium text-red-700">
-                                  {cNameCheck.message}
+                                <p className="mt-1 flex items-start gap-1 text-xs font-semibold text-red-700">
+                                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                  <span>{cNameErr}</span>
                                 </p>
                               )}
                             </div>
 
                             <div>
                               <label className="mb-1.5 block text-xs font-semibold text-[#1E1A16]">
-                                رقم الهاتف المصري <span className="text-red-600">*</span>
+                                رقم الهاتف المصري الخاص بالمرافق <span className="text-red-600">*</span>
                               </label>
                               <div
                                 dir="ltr"
                                 className={`flex items-stretch overflow-hidden rounded-lg border bg-white ${
                                   showPhoneErr
-                                    ? 'border-red-500'
-                                    : comp.phoneTouched && cPhoneCheck.valid
+                                    ? 'border-red-500 bg-red-50/40'
+                                    : comp.phoneTouched && cPhoneValid
                                       ? 'border-emerald-600'
                                       : 'border-[#D4CBBF] focus-within:border-[#9A5B25]'
                                 }`}
@@ -889,10 +959,11 @@ export function RegistrationView({
                               <div className="mt-1 flex items-start justify-between gap-2">
                                 <div className="flex-1">
                                   {showPhoneErr ? (
-                                    <p className="text-xs font-medium text-red-700">
-                                      {cPhoneCheck.message}
+                                    <p className="flex items-start gap-1 text-xs font-semibold text-red-700">
+                                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                      <span>{cPhoneErr}</span>
                                     </p>
-                                  ) : comp.phoneTouched && cPhoneCheck.valid ? (
+                                  ) : comp.phoneTouched && cPhoneValid ? (
                                     <p className="text-xs font-medium text-emerald-700">
                                       رقم مصري صحيح
                                     </p>
@@ -973,7 +1044,7 @@ export function RegistrationView({
                       </span>
 
                       {stat.isFull ? (
-                        <span className="text-xs font-extrabold text-red-700">البص اتملا</span>
+                        <span className="text-xs font-extrabold text-red-700">غير متاح</span>
                       ) : (
                         <span className="text-xs font-semibold text-emerald-700">متاح</span>
                       )}
@@ -1049,7 +1120,7 @@ export function RegistrationView({
 
                       {stat.isFull ? (
                         <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
-                          القروب اكتمل
+                          غير متاح
                         </span>
                       ) : (
                         <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">

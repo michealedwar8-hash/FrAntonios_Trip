@@ -93,6 +93,33 @@ function nowCairoWithMs_() {
   return Utilities.formatDate(new Date(), 'Africa/Cairo', 'yyyy/MM/dd HH:mm:ss.SSS');
 }
 
+function normalizeArabicName_(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/\s+/g, ' ');
+}
+
+function normalizePhoneKey_(value) {
+  var arabicMap = {
+    '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4',
+    '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
+    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
+    '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
+  };
+  var digits = String(value || '')
+    .replace(/[٠-٩۰-۹]/g, function (ch) {
+      return arabicMap[ch] || ch;
+    })
+    .replace(/[^\d]/g, '');
+  if (!digits) return '';
+  return digits.replace(/^20/, '').replace(/^0/, '');
+}
+
 function setupSheets() {
   const ss = getSpreadsheet_();
   const sheet = ensureRegistrationsSheet_(ss);
@@ -270,6 +297,10 @@ function doPost(e) {
       return handleClearTestData_(ss, sheet, String(payload.secret || ''));
     }
 
+    if (action === 'approveAllTest') {
+      return handleApproveAllTest_(ss, sheet, String(payload.secret || ''));
+    }
+
     return jsonOutput_({ ok: false, success: false, error: 'عملية غير معروفة: ' + action });
   } catch (err) {
     var errMsg = String(err.message || err);
@@ -295,7 +326,6 @@ function computeConfirmedCapacities_(registrations) {
   const colors = { red: 0, blue: 0, yellow: 0, green: 0 };
 
   registrations.forEach(function (reg) {
-    if (reg.isTest) return;
     reg.members.forEach(function (m) {
       if (!m.cancelled && m.paid) {
         if (buses[reg.bus] !== undefined) buses[reg.bus]++;
@@ -353,6 +383,76 @@ function handleCreate_(ss, sheet, payload) {
     }
   }
 
+  // فحص منع تكرار الأسماء وأرقام الهواتف (داخل نفس الحجز ومع جميع المسجلين النشطين)
+  var activeNamesMap = {};
+  var activePhonesMap = {};
+  existingRegs.forEach(function (existingReg) {
+    existingReg.members.forEach(function (em) {
+      if (em.cancelled) return;
+      var nKey = normalizeArabicName_(em.name);
+      var pKey = normalizePhoneKey_(em.phone);
+      if (nKey) activeNamesMap[nKey] = true;
+      if (pKey) activePhonesMap[pKey] = true;
+    });
+  });
+
+  var batchNamesMap = {};
+  var batchPhonesMap = {};
+  for (var v = 0; v < reg.members.length; v++) {
+    var vm = reg.members[v];
+    var vName = String(vm.name || '').trim().replace(/\s+/g, ' ');
+    var vPhone = String(vm.phone || '').trim();
+    if (!vName || !vPhone) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'يوجد فرد بياناته غير مكتملة (الاسم أو رقم الهاتف).',
+      });
+    }
+    var vNameKey = normalizeArabicName_(vName);
+    var vPhoneKey = normalizePhoneKey_(vPhone);
+
+    if (batchNamesMap[vNameKey]) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'الاسم مكرر داخل نفس الحجز — يجب كتابة اسم مختلف لكل شخص: ' + vName,
+      });
+    }
+    if (batchPhonesMap[vPhoneKey]) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error:
+          'الرقم ده متسجل وموجود لمشارك آخر في نفس الحجز (' +
+          vPhone +
+          ') — يجب أن يكتب كل مرافق رقمه الخاص.',
+      });
+    }
+    if (activeNamesMap[vNameKey]) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'تم تسجيل هذا الاسم من قبل — الاسم ده موجود بالفعل: ' + vName,
+      });
+    }
+    if (activePhonesMap[vPhoneKey]) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'الرقم ده متسجل وموجود بالفعل: ' + vPhone,
+      });
+    }
+
+    batchNamesMap[vNameKey] = true;
+    batchPhonesMap[vPhoneKey] = true;
+  }
+
   // التحقق الصارم من السعة المؤكدة للحجوزات الحقيقية
   const incomingCount = reg.members.length;
   if (!isTest) {
@@ -363,6 +463,7 @@ function handleCreate_(ss, sheet, payload) {
       return jsonOutput_({
         ok: false,
         success: false,
+        retryable: false,
         error: 'البص اتملا — لا يمكن التسجيل في هذا الباص.',
       });
     }
@@ -370,6 +471,7 @@ function handleCreate_(ss, sheet, payload) {
       return jsonOutput_({
         ok: false,
         success: false,
+        retryable: false,
         error:
           'تم رفض التسجيل: العدد المطلوب (' +
           incomingCount +
@@ -385,13 +487,15 @@ function handleCreate_(ss, sheet, payload) {
       return jsonOutput_({
         ok: false,
         success: false,
-        error: 'القروب اكتمل — لا يمكن التسجيل في هذا القروب.',
+        retryable: false,
+        error: 'القروب اتملا — لا يمكن التسجيل في هذا القروب.',
       });
     }
     if (incomingCount > colorRemaining) {
       return jsonOutput_({
         ok: false,
         success: false,
+        retryable: false,
         error:
           'تم رفض التسجيل: العدد المطلوب (' +
           incomingCount +
@@ -422,13 +526,6 @@ function handleCreate_(ss, sheet, payload) {
     var m = reg.members[i];
     var cleanName = String(m.name || '').trim().replace(/\s+/g, ' ');
     var cleanPhone = String(m.phone || '').trim();
-    if (!cleanName || !cleanPhone) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        error: 'يوجد فرد بياناته غير مكتملة (الاسم أو رقم الهاتف).',
-      });
-    }
     var memberId = regId + '_' + i;
     var isMain = i === 0;
 
@@ -521,7 +618,7 @@ function handleTogglePaid_(ss, sheet, regId, memberId) {
   }
 
   const nextPaid = !targetMember.paid;
-  if (nextPaid && !targetReg.isTest) {
+  if (nextPaid) {
     const caps = computeConfirmedCapacities_(allRegs);
     if (caps.buses[targetReg.bus] >= BUS_CAPACITY) {
       return jsonOutput_({
@@ -542,7 +639,7 @@ function handleTogglePaid_(ss, sheet, regId, memberId) {
         error:
           'لا يمكن تأكيد الدفع: قروب ' +
           COLOR_LABELS[targetReg.colorGroup] +
-          ' — القروب اكتمل (' +
+          ' — القروب اتملا (' +
           COLOR_GROUP_CAPACITY +
           ' فرد مؤكد).',
       });
@@ -625,43 +722,41 @@ function handleApproveAll_(ss, sheet, regId) {
     return jsonOutput_({ ok: true, success: true, registrations: allRegs });
   }
 
-  if (!targetReg.isTest) {
-    const caps = computeConfirmedCapacities_(allRegs);
-    const busRemaining = Math.max(0, BUS_CAPACITY - caps.buses[targetReg.bus]);
-    if (toApproveCount > busRemaining) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        error:
-          busRemaining === 0
-            ? 'لا يمكن تأكيد الدفع: ' + BUS_LABELS[targetReg.bus] + ' — البص اتملا.'
-            : 'لا يمكن تأكيد الكل (' +
-              toApproveCount +
-              ' أفراد): المتبقي في ' +
-              BUS_LABELS[targetReg.bus] +
-              ' هو ' +
-              busRemaining +
-              ' مقعد فقط.',
-      });
-    }
+  const caps = computeConfirmedCapacities_(allRegs);
+  const busRemaining = Math.max(0, BUS_CAPACITY - caps.buses[targetReg.bus]);
+  if (toApproveCount > busRemaining) {
+    return jsonOutput_({
+      ok: false,
+      success: false,
+      error:
+        busRemaining === 0
+          ? 'لا يمكن تأكيد الدفع: ' + BUS_LABELS[targetReg.bus] + ' — البص اتملا.'
+          : 'لا يمكن تأكيد الكل (' +
+            toApproveCount +
+            ' أفراد): المتبقي في ' +
+            BUS_LABELS[targetReg.bus] +
+            ' هو ' +
+            busRemaining +
+            ' مقعد فقط.',
+    });
+  }
 
-    const colorRemaining = Math.max(0, COLOR_GROUP_CAPACITY - caps.colors[targetReg.colorGroup]);
-    if (toApproveCount > colorRemaining) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        error:
-          colorRemaining === 0
-            ? 'لا يمكن تأكيد الدفع: قروب ' + COLOR_LABELS[targetReg.colorGroup] + ' — القروب اكتمل.'
-            : 'لا يمكن تأكيد الكل (' +
-              toApproveCount +
-              ' أفراد): المتبقي في قروب ' +
-              COLOR_LABELS[targetReg.colorGroup] +
-              ' هو ' +
-              colorRemaining +
-              ' مقعد فقط.',
-      });
-    }
+  const colorRemaining = Math.max(0, COLOR_GROUP_CAPACITY - caps.colors[targetReg.colorGroup]);
+  if (toApproveCount > colorRemaining) {
+    return jsonOutput_({
+      ok: false,
+      success: false,
+      error:
+        colorRemaining === 0
+          ? 'لا يمكن تأكيد الدفع: قروب ' + COLOR_LABELS[targetReg.colorGroup] + ' — القروب اتملا.'
+          : 'لا يمكن تأكيد الكل (' +
+            toApproveCount +
+            ' أفراد): المتبقي في قروب ' +
+            COLOR_LABELS[targetReg.colorGroup] +
+            ' هو ' +
+            colorRemaining +
+            ' مقعد فقط.',
+    });
   }
 
   const numRows = values.length;
@@ -881,6 +976,92 @@ function handleClearTestData_(ss, sheet, secret) {
   });
 }
 
+/**
+ * تأكيد دفع سجلات اختبار الضغط دفعة واحدة حتى اكتمال سعة الباصات (50) والألوان (25)
+ * لاختبار امتلاء الباصات والألوان والحسابات المالية كبيانات حقيقية تماماً.
+ */
+function handleApproveAllTest_(ss, sheet, secret) {
+  if (secret !== ADMIN_SECRET) {
+    return jsonOutput_({ ok: false, success: false, error: 'غير مصرح بتنفيذ هذه العملية.' });
+  }
+
+  const values = readRawRows_(sheet);
+  if (values.length === 0) {
+    return jsonOutput_({
+      ok: true,
+      success: true,
+      approvedCount: 0,
+      skippedCount: 0,
+      registrations: [],
+    });
+  }
+
+  const allRegs = parseRegistrationsFromValues_(values);
+  const caps = computeConfirmedCapacities_(allRegs);
+  const busRem = {
+    bus1: Math.max(0, BUS_CAPACITY - caps.buses.bus1),
+    bus2: Math.max(0, BUS_CAPACITY - caps.buses.bus2),
+  };
+  const colorRem = {
+    red: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.red),
+    blue: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.blue),
+    yellow: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.yellow),
+    green: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.green),
+  };
+
+  const numRows = values.length;
+  const paidCol = [];
+  const moneyCol = [];
+  var approvedCount = 0;
+  var skippedCount = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var row = values[i];
+    var tag = String(row[16] || '').trim().toUpperCase();
+    var reqId = String(row[15] || '').trim();
+    var isTestRow = tag === 'TEST' || reqId.indexOf('test_') === 0;
+    var isCancelled = String(row[6] || '').trim() === 'نعم';
+    var isPaid = String(row[5] || '').trim() === 'مدفوع';
+
+    if (isTestRow && !isCancelled && !isPaid) {
+      var busKey = BUS_CODES[String(row[7] || '').trim()] || 'bus1';
+      var colorKey = COLOR_CODES[String(row[8] || '').trim()] || 'red';
+      if (busRem[busKey] > 0 && colorRem[colorKey] > 0) {
+        busRem[busKey]--;
+        colorRem[colorKey]--;
+        paidCol.push(['مدفوع']);
+        moneyCol.push([TICKET_PRICE]);
+        row[5] = 'مدفوع';
+        row[12] = TICKET_PRICE;
+        approvedCount++;
+      } else {
+        paidCol.push([row[5]]);
+        moneyCol.push([row[12]]);
+        skippedCount++;
+      }
+    } else {
+      paidCol.push([row[5]]);
+      moneyCol.push([row[12]]);
+    }
+  }
+
+  if (approvedCount > 0) {
+    sheet.getRange(2, 6, numRows, 1).setValues(paidCol);
+    sheet.getRange(2, 13, numRows, 1).setValues(moneyCol);
+  }
+
+  const updated = parseRegistrationsFromValues_(values);
+  rebuildSummarySheet_(ss, updated);
+
+  return jsonOutput_({
+    ok: true,
+    success: true,
+    approvedCount: approvedCount,
+    skippedCount: skippedCount,
+    registrations: updated,
+  });
+}
+
 function parseRegistrationsFromValues_(values) {
   if (!values || values.length === 0) return [];
 
@@ -981,7 +1162,6 @@ function rebuildSummarySheet_(ss, registrations) {
     };
 
     registrations.forEach(function (r) {
-      if (r.isTest) return;
       if (recFilter && r.recipient !== recFilter) return;
       r.members.forEach(function (m) {
         if (m.cancelled) {

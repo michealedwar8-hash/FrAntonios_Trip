@@ -10,6 +10,8 @@ export interface SheetsApiResponse {
   timestamp?: string;
   deletedCount?: number;
   remainingCount?: number;
+  approvedCount?: number;
+  skippedCount?: number;
   registrations?: RegistrationRecord[];
   created?: RegistrationRecord;
   data?: {
@@ -279,4 +281,11 @@ export async function clearTestDataInSheets(
   secret: string
 ): Promise<RetryableApiResult> {
   return postWithRetry(scriptUrl, { action: 'clearTestData', secret }, undefined, 5);
+}
+
+export async function approveAllTestInSheets(
+  scriptUrl: string,
+  secret: string
+): Promise<RetryableApiResult> {
+  return postWithRetry(scriptUrl, { action: 'approveAllTest', secret }, undefined, 5);
 }
