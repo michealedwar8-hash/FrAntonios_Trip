@@ -8,6 +8,7 @@ export interface MemberRecord {
   id: string;
   name: string;
   phone: string;
+  birthDate?: string;
   isMain: boolean;
   paid: boolean;
   cancelled: boolean;

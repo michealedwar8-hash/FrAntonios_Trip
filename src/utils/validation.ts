@@ -151,6 +151,111 @@ export function formatEgyptianPhone(rawDigits: string): string {
   return `+20${digits}`;
 }
 
+/**
+ * Returns today's local date as YYYY-MM-DD without UTC midnight shift.
+ */
+export function getTodayIsoDate(referenceDate: Date = new Date()): string {
+  const y = referenceDate.getFullYear();
+  const m = String(referenceDate.getMonth() + 1).padStart(2, '0');
+  const d = String(referenceDate.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function parseIsoBirthDate(
+  raw?: string
+): { year: number; month: number; day: number } | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  // Verify the calendar date truly exists (rejects e.g. 2023-02-30)
+  const check = new Date(year, month - 1, day);
+  if (
+    check.getFullYear() !== year ||
+    check.getMonth() !== month - 1 ||
+    check.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return { year, month, day };
+}
+
+/**
+ * Validates a required birth date (YYYY-MM-DD).
+ * Intentionally never mentions or exposes calculated age so the registration page
+ * does not display age to the registrant.
+ */
+export function validateBirthDate(
+  raw: string,
+  referenceDate: Date = new Date()
+): ValidationResult {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: false, message: 'يرجى إدخال تاريخ الميلاد' };
+  }
+
+  const parsed = parseIsoBirthDate(trimmed);
+  if (!parsed) {
+    return { valid: false, message: 'تاريخ الميلاد غير صحيح' };
+  }
+
+  if (parsed.year < 1920) {
+    return { valid: false, message: 'يرجى إدخال سنة ميلاد صحيحة (1920 أو أحدث)' };
+  }
+
+  const refYear = referenceDate.getFullYear();
+  const refMonth = referenceDate.getMonth() + 1;
+  const refDay = referenceDate.getDate();
+
+  const isFuture =
+    parsed.year > refYear ||
+    (parsed.year === refYear && parsed.month > refMonth) ||
+    (parsed.year === refYear && parsed.month === refMonth && parsed.day > refDay);
+
+  if (isFuture) {
+    return { valid: false, message: 'تاريخ الميلاد لا يمكن أن يكون في المستقبل' };
+  }
+
+  return { valid: true, message: '' };
+}
+
+/**
+ * Calculates exact completed years of age from an ISO birth date (YYYY-MM-DD).
+ * Returns null if birthDate is missing or invalid.
+ */
+export function calculateAgeFromBirthDate(
+  birthDate?: string,
+  referenceDate: Date = new Date()
+): number | null {
+  const parsed = parseIsoBirthDate(birthDate);
+  if (!parsed) return null;
+
+  const refYear = referenceDate.getFullYear();
+  const refMonth = referenceDate.getMonth() + 1;
+  const refDay = referenceDate.getDate();
+
+  let age = refYear - parsed.year;
+  if (refMonth < parsed.month || (refMonth === parsed.month && refDay < parsed.day)) {
+    age -= 1;
+  }
+
+  if (age < 0 || age > 120) return null;
+  return age;
+}
+
+export function formatAgeArabic(age: number | null): string {
+  if (age === null) return '';
+  return `${age} سنة`;
+}
+
 export interface RegSummary {
   activeCount: number;
   paidCount: number;
@@ -321,6 +426,9 @@ export function buildWhatsAppDetails(
   const totalPersons = data.members.length;
   const totalPrice = totalPersons * TICKET_PRICE;
 
+  const mainAge = calculateAgeFromBirthDate(mainMember.birthDate);
+  const mainAgeLine = mainAge !== null ? `\nالعمر: ${formatAgeArabic(mainAge)}` : '';
+
   const hasMixed = hasMixedMemberAssignments(data);
   let message = '';
 
@@ -329,14 +437,16 @@ export function buildWhatsAppDetails(
       .map((m) => {
         const mBus = getMemberBus(m, data);
         const mColor = getMemberColor(m, data);
-        return `- ${m.name} (${LABELS.buses[mBus]} | قروب ${LABELS.colors[mColor]})`;
+        const mAge = calculateAgeFromBirthDate(m.birthDate);
+        const agePart = mAge !== null ? `العمر: ${formatAgeArabic(mAge)} | ` : '';
+        return `- ${m.name} (${agePart}${LABELS.buses[mBus]} | قروب ${LABELS.colors[mColor]})`;
       })
       .join('\n');
 
     message =
       `سلام و نعمة\n` +
       `الاسم: ${mainMember.name}\n` +
-      `رقم الهاتف: ${mainMember.phone}\n` +
+      `رقم الهاتف: ${mainMember.phone}${mainAgeLine}\n` +
       `عدد الأفراد: ${totalPersons}\n` +
       `تفاصيل الأفراد:\n${memberLines}\n` +
       `الإجمالي: ${totalPrice} جنيه\n` +
@@ -346,13 +456,18 @@ export function buildWhatsAppDetails(
     const mainBus = getMemberBus(mainMember, data);
     const mainColor = getMemberColor(mainMember, data);
     const companionsNames = companions.length
-      ? `\nالمرافقون: ${companions.map((c) => c.name).join('، ')}`
+      ? `\nالمرافقون: ${companions
+          .map((c) => {
+            const cAge = calculateAgeFromBirthDate(c.birthDate);
+            return cAge !== null ? `${c.name} (${formatAgeArabic(cAge)})` : c.name;
+          })
+          .join('، ')}`
       : '';
 
     message =
       `سلام و نعمة\n` +
       `الاسم: ${mainMember.name}\n` +
-      `رقم الهاتف: ${mainMember.phone}\n` +
+      `رقم الهاتف: ${mainMember.phone}${mainAgeLine}\n` +
       `عدد الأفراد: ${totalPersons}${companionsNames}\n` +
       `الإجمالي: ${totalPrice} جنيه\n` +
       `طريقة الدفع: ${paymentName}\n` +
@@ -419,7 +534,7 @@ export function exportRegistrationsToCSV(
   filenameSuffix: string
 ): void {
   let csvContent =
-    '\uFEFFكود الحجز,الاسم,الهاتف,الصفة,حالة الفرد,الباص,المجموعة,المستلم,طريقة الدفع,المبلغ المدفوع للفرد,التاريخ\n';
+    '\uFEFFكود الحجز,الاسم,الهاتف,تاريخ الميلاد,العمر,الصفة,حالة الفرد,الباص,المجموعة,المستلم,طريقة الدفع,المبلغ المدفوع للفرد,التاريخ\n';
 
   for (const r of filtered) {
     for (const m of r.members) {
@@ -427,10 +542,13 @@ export function exportRegistrationsToCSV(
       const paidAmount = !m.cancelled && m.paid ? TICKET_PRICE : 0;
       const mBus = getMemberBus(m, r);
       const mColor = getMemberColor(m, r);
+      const mAge = calculateAgeFromBirthDate(m.birthDate);
       const row = [
         r.id,
         m.name,
         m.phone,
+        m.birthDate || '',
+        mAge !== null ? mAge : '',
         m.isMain ? 'رئيسي' : 'مرافق',
         statusText,
         LABELS.buses[mBus] || mBus,
@@ -625,11 +743,14 @@ export function exportRegistrationsToExcel(
       const remainingAmount = !m.cancelled && !m.paid ? TICKET_PRICE : 0;
       const mBus = getMemberBus(m, r);
       const mColor = getMemberColor(m, r);
+      const mAge = calculateAgeFromBirthDate(m.birthDate);
 
       memberRows.push({
         'كود الحجز': r.id,
         'الاسم الثلاثي': m.name,
         'رقم الهاتف': m.phone,
+        'تاريخ الميلاد': m.birthDate || '—',
+        العمر: mAge !== null ? mAge : '—',
         الصفة: m.isMain ? 'مشترك رئيسي' : 'مرافق',
         'حالة الفرد': statusText,
         الباص: LABELS.buses[mBus] || mBus,
@@ -653,6 +774,8 @@ export function exportRegistrationsToExcel(
     { wch: 16 },
     { wch: 26 },
     { wch: 18 },
+    { wch: 14 },
+    { wch: 10 },
     { wch: 14 },
     { wch: 12 },
     { wch: 14 },

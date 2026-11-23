@@ -10,6 +10,8 @@ import {
   type RegistrationRecord,
 } from '../types/trip';
 import {
+  calculateAgeFromBirthDate,
+  formatAgeArabic,
   getMemberBus,
   getMemberColor,
   getRegSummary,
@@ -341,6 +343,21 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
                     >
                       {m.cancelled ? 'ملغي' : m.paid ? 'مدفوع' : 'لم يدفع'}
                     </span>
+                    {(() => {
+                      const memberAge = calculateAgeFromBirthDate(m.birthDate);
+                      if (memberAge === null) return null;
+                      return (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span
+                            title={m.birthDate ? `تاريخ الميلاد: ${m.birthDate}` : undefined}
+                            className="inline-flex items-center rounded border border-[#E4DDD2] bg-[#FAF8F4] px-1.5 py-0.5 text-[11px] font-bold text-[#7C4518]"
+                          >
+                            العمر: {formatAgeArabic(memberAge)}
+                          </span>
+                        </>
+                      );
+                    })()}
                     {reg.isGroup && (() => {
                       const mBus = getMemberBus(m, reg);
                       const mColor = getMemberColor(m, reg);

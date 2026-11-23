@@ -43,6 +43,8 @@ const HEADERS = [
   'رقم الطابور',     // Col 15 (O)
   'معرف الطلب',      // Col 16 (P)
   'وسم الاختبار',    // Col 17 (Q)
+  'تاريخ الميلاد',   // Col 18 (R)
+  'العمر',           // Col 19 (S)
 ];
 
 const BUS_LABELS = { bus1: 'الباص الأول', bus2: 'الباص الثاني' };
@@ -120,6 +122,47 @@ function normalizePhoneKey_(value) {
   return digits.replace(/^20/, '').replace(/^0/, '');
 }
 
+function normalizeBirthDate_(value) {
+  if (!value) return '';
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, 'Africa/Cairo', 'yyyy-MM-dd');
+  }
+  var s = String(value || '').replace(/^'/, '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return '';
+}
+
+function calculateAgeFromBirthDate_(birthDateStr) {
+  var clean = normalizeBirthDate_(birthDateStr);
+  if (!clean) return null;
+  var parts = clean.split('-');
+  var bYear = Number(parts[0]);
+  var bMonth = Number(parts[1]);
+  var bDay = Number(parts[2]);
+  if (!bYear || bMonth < 1 || bMonth > 12 || bDay < 1 || bDay > 31) return null;
+
+  var check = new Date(bYear, bMonth - 1, bDay);
+  if (
+    check.getFullYear() !== bYear ||
+    check.getMonth() !== bMonth - 1 ||
+    check.getDate() !== bDay
+  ) {
+    return null;
+  }
+
+  var todayParts = Utilities.formatDate(new Date(), 'Africa/Cairo', 'yyyy-MM-dd').split('-');
+  var tYear = Number(todayParts[0]);
+  var tMonth = Number(todayParts[1]);
+  var tDay = Number(todayParts[2]);
+
+  var age = tYear - bYear;
+  if (tMonth < bMonth || (tMonth === bMonth && tDay < bDay)) {
+    age--;
+  }
+  if (age < 0 || age > 120) return null;
+  return age;
+}
+
 function setupSheets() {
   const ss = getSpreadsheet_();
   const sheet = ensureRegistrationsSheet_(ss);
@@ -148,13 +191,16 @@ function ensureRegistrationsSheet_(ss) {
     sheet.getRange('D:D').setNumberFormat('@');
     sheet.getRange('A:B').setNumberFormat('@');
     sheet.getRange('P:P').setNumberFormat('@');
+    sheet.getRange('R:R').setNumberFormat('@');
 
-    const widths = [140, 160, 210, 150, 95, 95, 75, 110, 110, 90, 125, 115, 110, 185, 95, 180, 95];
+    const widths = [
+      140, 160, 210, 150, 95, 95, 75, 110, 110, 90, 125, 115, 110, 185, 95, 180, 95, 120, 75,
+    ];
     widths.forEach(function (w, i) {
       sheet.setColumnWidth(i + 1, w);
     });
   } else if (sheet.getLastColumn() < HEADERS.length) {
-    // ترقية تلقائية للأوراق القديمة بإضافة الأعمدة 15-17 بدون فقدان أي بيانات
+    // ترقية تلقائية للأوراق القديمة بإضافة الأعمدة الجديدة بدون فقدان أي بيانات
     const missingStart = sheet.getLastColumn() + 1;
     const missingHeaders = HEADERS.slice(missingStart - 1);
     const range = sheet.getRange(1, missingStart, 1, missingHeaders.length);
@@ -165,6 +211,7 @@ function ensureRegistrationsSheet_(ss) {
       .setFontColor('#FFFFFF')
       .setHorizontalAlignment('center');
     sheet.getRange('P:P').setNumberFormat('@');
+    sheet.getRange('R:R').setNumberFormat('@');
   }
 
   return sheet;
@@ -437,6 +484,16 @@ function handleCreate_(ss, sheet, payload) {
         error: 'يوجد فرد بياناته غير مكتملة (الاسم أو رقم الهاتف).',
       });
     }
+    var vBirthDate = normalizeBirthDate_(vm.birthDate);
+    var vAge = calculateAgeFromBirthDate_(vBirthDate);
+    if (!isTest && (!vBirthDate || vAge === null)) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'تاريخ الميلاد غير صحيح أو غير مكتمل للفرد: ' + vName,
+      });
+    }
     var vNameKey = normalizeArabicName_(vName);
     var vPhoneKey = normalizePhoneKey_(vPhone);
 
@@ -576,6 +633,8 @@ function handleCreate_(ss, sheet, payload) {
     var m = reg.members[i];
     var cleanName = String(m.name || '').trim().replace(/\s+/g, ' ');
     var cleanPhone = String(m.phone || '').trim();
+    var cleanBirthDate = normalizeBirthDate_(m.birthDate);
+    var computedAge = calculateAgeFromBirthDate_(cleanBirthDate);
     var memberId = regId + '_' + i;
     var isMain = i === 0;
     var mBusKey = memberBusKeys[i];
@@ -585,6 +644,7 @@ function handleCreate_(ss, sheet, payload) {
       id: memberId,
       name: cleanName,
       phone: cleanPhone,
+      birthDate: cleanBirthDate || undefined,
       isMain: isMain,
       paid: false,
       cancelled: false,
@@ -610,6 +670,8 @@ function handleCreate_(ss, sheet, payload) {
       seqNo,
       requestId,
       isTest ? 'TEST' : '',
+      cleanBirthDate,
+      computedAge !== null ? computedAge : '',
     ]);
   }
 
@@ -617,6 +679,7 @@ function handleCreate_(ss, sheet, payload) {
   sheet.getRange(startRow, 1, rowsToInsert.length, 2).setNumberFormat('@');
   sheet.getRange(startRow, 4, rowsToInsert.length, 1).setNumberFormat('@');
   sheet.getRange(startRow, 16, rowsToInsert.length, 1).setNumberFormat('@');
+  sheet.getRange(startRow, 18, rowsToInsert.length, 1).setNumberFormat('@');
   sheet.getRange(startRow, 1, rowsToInsert.length, HEADERS.length).setValues(rowsToInsert);
 
   const createdRecord = {
@@ -1037,6 +1100,7 @@ function handleClearTestData_(ss, sheet, secret) {
       sheet.getRange(2, 1, realRows.length, 2).setNumberFormat('@');
       sheet.getRange(2, 4, realRows.length, 1).setNumberFormat('@');
       sheet.getRange(2, 16, realRows.length, 1).setNumberFormat('@');
+      sheet.getRange(2, 18, realRows.length, 1).setNumberFormat('@');
       sheet.getRange(2, 1, realRows.length, HEADERS.length).setValues(realRows);
       if (totalExistingRows > realRows.length) {
         sheet.deleteRows(realRows.length + 2, totalExistingRows - realRows.length);
@@ -1176,6 +1240,7 @@ function parseRegistrationsFromValues_(values) {
     var requestId = String(row[15] || '').trim();
     var testTag = String(row[16] || '').trim().toUpperCase();
     var isTest = testTag === 'TEST' || requestId.indexOf('test_') === 0;
+    var birthDate = normalizeBirthDate_(row[17]);
 
     if (!byId[regId]) {
       byId[regId] = {
@@ -1198,6 +1263,7 @@ function parseRegistrationsFromValues_(values) {
       id: memberId,
       name: name,
       phone: phone,
+      birthDate: birthDate || undefined,
       isMain: isMain,
       paid: paid,
       cancelled: cancelled,

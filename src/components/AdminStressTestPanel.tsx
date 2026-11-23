@@ -31,6 +31,7 @@ interface StressTestSpec {
   requestId: string;
   name: string;
   phone: string;
+  birthDate: string;
   bus: BusKey;
   colorGroup: ColorGroupKey;
   paymentMethod: PaymentMethodKey;
@@ -122,11 +123,16 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
       const paymentMethod = PAYMENT_CYCLE[idx % PAYMENT_CYCLE.length];
       const recipient = PAYMENT_RECIPIENT_MAP[paymentMethod];
 
+      const birthYear = 1995 + (idx % 12);
+      const birthMonth = String((idx % 12) + 1).padStart(2, '0');
+      const birthDay = String((idx % 25) + 1).padStart(2, '0');
+
       return {
         index: i,
         requestId: `test_${batchId}_${idx + 1}`,
         name: `اختبار ضغط رقم${i}`,
         phone: buildTestPhone(phoneBase + idx + 1),
+        birthDate: `${birthYear}-${birthMonth}-${birthDay}`,
         bus,
         colorGroup,
         paymentMethod,
@@ -157,6 +163,7 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
             id: `${baseId + idx}_0`,
             name: spec.name,
             phone: spec.phone,
+            birthDate: spec.birthDate,
             isMain: true,
             paid: false,
             cancelled: false,
@@ -206,6 +213,7 @@ export const AdminStressTestPanel = memo(function AdminStressTestPanel({
               id: `${regId}_0`,
               name: spec.name,
               phone: spec.phone,
+              birthDate: spec.birthDate,
               isMain: true,
               paid: false,
               cancelled: false,

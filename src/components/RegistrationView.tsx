@@ -36,10 +36,12 @@ import {
   getActiveExistingSets,
   getMemberBus,
   getMemberColor,
+  getTodayIsoDate,
   hasMixedMemberAssignments,
   normalizeArabicText,
   normalizeDigits,
   normalizePhoneKey,
+  validateBirthDate,
   validateEgyptianPhone,
   validateTripleName,
   type CapacityCounts,
@@ -52,12 +54,14 @@ interface CompanionDraft {
   keyId: string;
   name: string;
   phone: string;
+  birthDate: string;
   bus: BusKey | '';
   colorGroup: ColorGroupKey | '';
   busClickedFull: string;
   colorClickedFull: string;
   nameTouched: boolean;
   phoneTouched: boolean;
+  birthDateTouched: boolean;
 }
 
 let companionKeySeq = 1;
@@ -67,12 +71,14 @@ function createEmptyCompanion(): CompanionDraft {
     keyId: `comp_${Date.now()}_${companionKeySeq}`,
     name: '',
     phone: '',
+    birthDate: '',
     bus: '',
     colorGroup: '',
     busClickedFull: '',
     colorClickedFull: '',
     nameTouched: false,
     phoneTouched: false,
+    birthDateTouched: false,
   };
 }
 
@@ -369,6 +375,10 @@ export function RegistrationView({
   const [phoneDigits, setPhoneDigits] = useState('');
   const [phoneTouched, setPhoneTouched] = useState(false);
 
+  const [birthDate, setBirthDate] = useState('');
+  const [birthDateTouched, setBirthDateTouched] = useState(false);
+  const maxBirthDate = useMemo(() => getTodayIsoDate(), []);
+
   const [regType, setRegType] = useState<'self' | 'group'>('self');
   const [companions, setCompanions] = useState<CompanionDraft[]>(() => [createEmptyCompanion()]);
 
@@ -448,7 +458,17 @@ export function RegistrationView({
   useEffect(() => {
     if (formError) setFormError('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalPersons, busChoice, colorGroup, paymentMethod, fullName, phoneDigits, companions, regType]);
+  }, [
+    totalPersons,
+    busChoice,
+    colorGroup,
+    paymentMethod,
+    fullName,
+    phoneDigits,
+    birthDate,
+    companions,
+    regType,
+  ]);
 
   const existingActiveSets = useMemo(
     () => getActiveExistingSets(registrations),
@@ -507,6 +527,9 @@ export function RegistrationView({
   const mainNameValid = mainNameError === '';
   const mainPhoneError = getMemberPhoneError(phoneDigits);
   const mainPhoneValid = mainPhoneError === '';
+  const mainBirthDateResult = validateBirthDate(birthDate);
+  const mainBirthDateError = mainBirthDateResult.valid ? '' : mainBirthDateResult.message;
+  const mainBirthDateValid = mainBirthDateResult.valid;
 
   const selectionDemand = useMemo(() => {
     const buses: Record<BusKey, number> = { bus1: 0, bus2: 0 };
@@ -616,6 +639,8 @@ export function RegistrationView({
     setNameTouched(false);
     setPhoneDigits('');
     setPhoneTouched(false);
+    setBirthDate('');
+    setBirthDateTouched(false);
     setRegType('self');
     setCompanions([createEmptyCompanion()]);
     setBusChoice('');
@@ -646,6 +671,11 @@ export function RegistrationView({
 
     if (!mainPhoneValid) {
       setFormError(mainPhoneError);
+      return;
+    }
+
+    if (!mainBirthDateValid) {
+      setFormError(mainBirthDateError);
       return;
     }
 
@@ -694,6 +724,11 @@ export function RegistrationView({
           setFormError(`المرافق ${i + 1}: ${cPhoneErr}`);
           return;
         }
+        const cBirthRes = validateBirthDate(comp.birthDate);
+        if (!cBirthRes.valid) {
+          setFormError(`المرافق ${i + 1}: ${cBirthRes.message}`);
+          return;
+        }
         if (!comp.bus) {
           setFormError(`المرافق ${i + 1}: يرجى اختيار الباص`);
           return;
@@ -731,6 +766,7 @@ export function RegistrationView({
         id: `${regId}_0`,
         name: fullName.trim().replace(/\s+/g, ' '),
         phone: formatEgyptianPhone(phoneDigits),
+        birthDate: birthDate.trim(),
         isMain: true,
         paid: false,
         cancelled: false,
@@ -747,6 +783,7 @@ export function RegistrationView({
           id: `${regId}_${idx + 1}`,
           name: comp.name.trim().replace(/\s+/g, ' '),
           phone: formatEgyptianPhone(comp.phone),
+          birthDate: comp.birthDate.trim(),
           isMain: false,
           paid: false,
           cancelled: false,
@@ -1224,6 +1261,48 @@ export function RegistrationView({
                 </div>
               </div>
 
+              <div className="mt-5 max-w-sm">
+                <label
+                  htmlFor="birthDate"
+                  className="mb-1.5 block text-sm font-semibold text-[#1E1A16]"
+                >
+                  تاريخ الميلاد <span className="text-red-600">*</span>
+                </label>
+                <input
+                  id="birthDate"
+                  type="date"
+                  dir="ltr"
+                  min="1920-01-01"
+                  max={maxBirthDate}
+                  value={birthDate}
+                  onChange={(e) => {
+                    setBirthDate(e.target.value);
+                    if (!birthDateTouched) setBirthDateTouched(true);
+                  }}
+                  onBlur={() => setBirthDateTouched(true)}
+                  aria-invalid={(birthDateTouched || submitAttempted) && !mainBirthDateValid}
+                  className={`w-full rounded-lg border px-3.5 py-2.5 font-mono-num text-sm text-[#1E1A16] transition-colors focus:outline-none ${
+                    (birthDateTouched || submitAttempted) && !mainBirthDateValid
+                      ? 'border-red-500 bg-red-50/40 focus:border-red-600'
+                      : birthDateTouched && mainBirthDateValid
+                        ? 'border-emerald-600 bg-emerald-50/20 focus:border-emerald-700'
+                        : 'border-[#D4CBBF] bg-white focus:border-[#9A5B25]'
+                  }`}
+                />
+                {(birthDateTouched || submitAttempted) && !mainBirthDateValid && (
+                  <p className="mt-1.5 flex items-start gap-1.5 text-xs font-semibold text-red-700">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{mainBirthDateError}</span>
+                  </p>
+                )}
+                {birthDateTouched && mainBirthDateValid && (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>تم إدخال تاريخ الميلاد بنجاح</span>
+                  </p>
+                )}
+              </div>
+
               {regType === 'group' && (
                 <div className="mt-5 space-y-4 rounded-lg border border-[#E4DDD2] bg-[#FAF8F4] p-4">
                   <div>
@@ -1315,10 +1394,14 @@ export function RegistrationView({
                     {companions.map((comp, idx) => {
                       const cNameErr = getMemberNameError(comp.name);
                       const cPhoneErr = getMemberPhoneError(comp.phone);
+                      const cBirthRes = validateBirthDate(comp.birthDate);
                       const cNameValid = cNameErr === '';
                       const cPhoneValid = cPhoneErr === '';
+                      const cBirthValid = cBirthRes.valid;
                       const showNameErr = (comp.nameTouched || submitAttempted) && !cNameValid;
                       const showPhoneErr = (comp.phoneTouched || submitAttempted) && !cPhoneValid;
+                      const showBirthErr =
+                        (comp.birthDateTouched || submitAttempted) && !cBirthValid;
 
                       return (
                         <div key={comp.keyId} className={idx === 0 ? 'pb-5' : 'py-5'}>
@@ -1419,6 +1502,48 @@ export function RegistrationView({
                                 </span>
                               </div>
                             </div>
+                          </div>
+
+                          {/* Companion Birth Date (directly after Name & Phone — no age displayed here) */}
+                          <div className="mt-4 max-w-sm">
+                            <label className="mb-1.5 block text-xs font-semibold text-[#1E1A16]">
+                              تاريخ الميلاد الخاص بالمرافق <span className="text-red-600">*</span>
+                            </label>
+                            <input
+                              type="date"
+                              dir="ltr"
+                              min="1920-01-01"
+                              max={maxBirthDate}
+                              value={comp.birthDate}
+                              onChange={(e) =>
+                                updateCompanion(comp.keyId, {
+                                  birthDate: e.target.value,
+                                  birthDateTouched: true,
+                                })
+                              }
+                              onBlur={() =>
+                                updateCompanion(comp.keyId, { birthDateTouched: true })
+                              }
+                              aria-invalid={showBirthErr}
+                              className={`w-full rounded-lg border bg-white px-3 py-2 font-mono-num text-sm text-[#1E1A16] focus:outline-none ${
+                                showBirthErr
+                                  ? 'border-red-500 bg-red-50/40'
+                                  : comp.birthDateTouched && cBirthValid
+                                    ? 'border-emerald-600'
+                                    : 'border-[#D4CBBF] focus:border-[#9A5B25]'
+                              }`}
+                            />
+                            {showBirthErr && (
+                              <p className="mt-1 flex items-start gap-1 text-xs font-semibold text-red-700">
+                                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                <span>{cBirthRes.message}</span>
+                              </p>
+                            )}
+                            {comp.birthDateTouched && cBirthValid && (
+                              <p className="mt-1 text-xs font-medium text-emerald-700">
+                                تم إدخال تاريخ الميلاد بنجاح
+                              </p>
+                            )}
                           </div>
 
                           {/* Per-Companion Bus & Color Selection */}
