@@ -11,11 +11,29 @@ import {
   type BookingStatusKey,
   type BusKey,
   type ColorGroupKey,
+  type MemberRecord,
   type PaymentMethodKey,
   type RecipientKey,
   type RegistrationRecord,
   type WhatsAppConfig,
 } from '../types/trip';
+
+export function getMemberBus(member: MemberRecord, reg: RegistrationRecord): BusKey {
+  return member.bus ?? reg.bus;
+}
+
+export function getMemberColor(member: MemberRecord, reg: RegistrationRecord): ColorGroupKey {
+  return member.colorGroup ?? reg.colorGroup;
+}
+
+export function hasMixedMemberAssignments(reg: RegistrationRecord): boolean {
+  if (reg.members.length <= 1) return false;
+  const firstBus = getMemberBus(reg.members[0], reg);
+  const firstColor = getMemberColor(reg.members[0], reg);
+  return reg.members.some(
+    (m) => getMemberBus(m, reg) !== firstBus || getMemberColor(m, reg) !== firstColor
+  );
+}
 
 export interface ValidationResult {
   valid: boolean;
@@ -194,12 +212,14 @@ export function getCapacityCounts(registrations: RegistrationRecord[]): Capacity
   for (const reg of registrations) {
     for (const member of reg.members) {
       if (member.cancelled) continue;
+      const mBus = getMemberBus(member, reg);
+      const mColor = getMemberColor(member, reg);
       if (member.paid) {
-        if (reg.bus in busConfirmed) busConfirmed[reg.bus]++;
-        if (reg.colorGroup in colorConfirmed) colorConfirmed[reg.colorGroup]++;
+        if (mBus in busConfirmed) busConfirmed[mBus]++;
+        if (mColor in colorConfirmed) colorConfirmed[mColor]++;
       } else {
-        if (reg.bus in busPending) busPending[reg.bus]++;
-        if (reg.colorGroup in colorPending) colorPending[reg.colorGroup]++;
+        if (mBus in busPending) busPending[mBus]++;
+        if (mColor in colorPending) colorPending[mColor]++;
       }
     }
   }
@@ -301,19 +321,44 @@ export function buildWhatsAppDetails(
   const totalPersons = data.members.length;
   const totalPrice = totalPersons * TICKET_PRICE;
 
-  const companionsNames = companions.length
-    ? `\nالمرافقون: ${companions.map((c) => c.name).join('، ')}`
-    : '';
+  const hasMixed = hasMixedMemberAssignments(data);
+  let message = '';
 
-  const message =
-    `سلام و نعمة\n` +
-    `الاسم: ${mainMember.name}\n` +
-    `رقم الهاتف: ${mainMember.phone}\n` +
-    `عدد الأفراد: ${totalPersons}${companionsNames}\n` +
-    `الإجمالي: ${totalPrice} جنيه\n` +
-    `طريقة الدفع: ${paymentName}\n` +
-    `الباص: ${LABELS.buses[data.bus]} | المجموعة: ${LABELS.colors[data.colorGroup]}\n` +
-    `كود الحجز: ${data.id}`;
+  if (hasMixed) {
+    const memberLines = data.members
+      .map((m) => {
+        const mBus = getMemberBus(m, data);
+        const mColor = getMemberColor(m, data);
+        return `- ${m.name} (${LABELS.buses[mBus]} | قروب ${LABELS.colors[mColor]})`;
+      })
+      .join('\n');
+
+    message =
+      `سلام و نعمة\n` +
+      `الاسم: ${mainMember.name}\n` +
+      `رقم الهاتف: ${mainMember.phone}\n` +
+      `عدد الأفراد: ${totalPersons}\n` +
+      `تفاصيل الأفراد:\n${memberLines}\n` +
+      `الإجمالي: ${totalPrice} جنيه\n` +
+      `طريقة الدفع: ${paymentName}\n` +
+      `كود الحجز: ${data.id}`;
+  } else {
+    const mainBus = getMemberBus(mainMember, data);
+    const mainColor = getMemberColor(mainMember, data);
+    const companionsNames = companions.length
+      ? `\nالمرافقون: ${companions.map((c) => c.name).join('، ')}`
+      : '';
+
+    message =
+      `سلام و نعمة\n` +
+      `الاسم: ${mainMember.name}\n` +
+      `رقم الهاتف: ${mainMember.phone}\n` +
+      `عدد الأفراد: ${totalPersons}${companionsNames}\n` +
+      `الإجمالي: ${totalPrice} جنيه\n` +
+      `طريقة الدفع: ${paymentName}\n` +
+      `الباص: ${LABELS.buses[mainBus]} | المجموعة: ${LABELS.colors[mainColor]}\n` +
+      `كود الحجز: ${data.id}`;
+  }
 
   const url = `https://wa.me/${phoneNum}?text=${encodeURIComponent(message)}`;
   return { url, message, phoneNum };
@@ -380,14 +425,16 @@ export function exportRegistrationsToCSV(
     for (const m of r.members) {
       const statusText = m.cancelled ? 'ملغي' : m.paid ? 'مدفوع' : 'لم يدفع';
       const paidAmount = !m.cancelled && m.paid ? TICKET_PRICE : 0;
+      const mBus = getMemberBus(m, r);
+      const mColor = getMemberColor(m, r);
       const row = [
         r.id,
         m.name,
         m.phone,
         m.isMain ? 'رئيسي' : 'مرافق',
         statusText,
-        LABELS.buses[r.bus] || r.bus,
-        LABELS.colors[r.colorGroup] || r.colorGroup,
+        LABELS.buses[mBus] || mBus,
+        LABELS.colors[mColor] || mColor,
         LABELS.recipients[r.recipient] || '',
         LABELS.payments[r.paymentMethod] || r.paymentMethod,
         paidAmount,
@@ -576,6 +623,8 @@ export function exportRegistrationsToExcel(
       const statusText = m.cancelled ? 'ملغي' : m.paid ? 'مدفوع' : 'لم يدفع';
       const paidAmount = !m.cancelled && m.paid ? TICKET_PRICE : 0;
       const remainingAmount = !m.cancelled && !m.paid ? TICKET_PRICE : 0;
+      const mBus = getMemberBus(m, r);
+      const mColor = getMemberColor(m, r);
 
       memberRows.push({
         'كود الحجز': r.id,
@@ -583,8 +632,8 @@ export function exportRegistrationsToExcel(
         'رقم الهاتف': m.phone,
         الصفة: m.isMain ? 'مشترك رئيسي' : 'مرافق',
         'حالة الفرد': statusText,
-        الباص: LABELS.buses[r.bus] || r.bus,
-        'القروب اللوني': LABELS.colors[r.colorGroup] || r.colorGroup,
+        الباص: LABELS.buses[mBus] || mBus,
+        'القروب اللوني': LABELS.colors[mColor] || mColor,
         'نوع الحجز': r.isGroup ? 'مجموعة' : 'فردي',
         'المسؤول المستلم': LABELS.recipients[r.recipient] || '',
         'طريقة الدفع': LABELS.payments[r.paymentMethod] || r.paymentMethod,

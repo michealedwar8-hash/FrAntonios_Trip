@@ -50,11 +50,13 @@ export async function fetchRegistrationsFromSheets(
   action: 'list' | 'adminData' = 'adminData'
 ): Promise<SheetsApiResponse> {
   const separator = scriptUrl.includes('?') ? '&' : '?';
-  const url = `${scriptUrl}${separator}action=${action}&_t=${Date.now()}`;
+  const cacheBust = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const url = `${scriptUrl}${separator}action=${action}&_t=${cacheBust}`;
 
   const response = await fetch(url, {
     method: 'GET',
     redirect: 'follow',
+    cache: 'no-store',
   });
 
   if (!response.ok) {

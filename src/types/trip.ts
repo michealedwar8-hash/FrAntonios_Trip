@@ -11,6 +11,8 @@ export interface MemberRecord {
   isMain: boolean;
   paid: boolean;
   cancelled: boolean;
+  bus?: BusKey;
+  colorGroup?: ColorGroupKey;
 }
 
 export interface RegistrationRecord {

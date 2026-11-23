@@ -328,8 +328,10 @@ function computeConfirmedCapacities_(registrations) {
   registrations.forEach(function (reg) {
     reg.members.forEach(function (m) {
       if (!m.cancelled && m.paid) {
-        if (buses[reg.bus] !== undefined) buses[reg.bus]++;
-        if (colors[reg.colorGroup] !== undefined) colors[reg.colorGroup]++;
+        var mBus = m.bus || reg.bus;
+        var mColor = m.colorGroup || reg.colorGroup;
+        if (buses[mBus] !== undefined) buses[mBus]++;
+        if (colors[mColor] !== undefined) colors[mColor]++;
       }
     });
   });
@@ -348,16 +350,41 @@ function handleCreate_(ss, sheet, payload) {
     return jsonOutput_({ ok: false, success: false, error: 'مفتاح اختبار الضغط غير مصرح به.' });
   }
 
-  const busKey = BUS_CODES[reg.bus] || '';
-  const colorKey = COLOR_CODES[reg.colorGroup] || '';
+  const defaultBusKey = BUS_CODES[reg.bus] || '';
+  const defaultColorKey = COLOR_CODES[reg.colorGroup] || '';
   const paymentKey = PAYMENT_CODES[reg.paymentMethod] || '';
 
-  if (!busKey) return jsonOutput_({ ok: false, success: false, error: 'اختيار الباص غير صحيح.' });
-  if (!colorKey)
-    return jsonOutput_({ ok: false, success: false, error: 'اختيار القروب اللوني غير صحيح.' });
   if (!paymentKey)
     return jsonOutput_({ ok: false, success: false, error: 'اختيار طريقة الدفع غير صحيح.' });
 
+  const memberBusKeys = [];
+  const memberColorKeys = [];
+  for (var mc = 0; mc < reg.members.length; mc++) {
+    var mItem = reg.members[mc];
+    var mBus = BUS_CODES[mItem.bus] || defaultBusKey;
+    var mColor = COLOR_CODES[mItem.colorGroup] || defaultColorKey;
+    if (!mBus) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'اختيار الباص غير صحيح للفرد رقم ' + (mc + 1) + '.',
+      });
+    }
+    if (!mColor) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        retryable: false,
+        error: 'اختيار القروب اللوني غير صحيح للفرد رقم ' + (mc + 1) + '.',
+      });
+    }
+    memberBusKeys.push(mBus);
+    memberColorKeys.push(mColor);
+  }
+
+  const busKey = memberBusKeys[0];
+  const colorKey = memberColorKeys[0];
   const recipientKey = paymentKey === 'vf' ? 'fayez' : 'mekhail';
   const requestId = String(payload.requestId || reg.requestId || '').trim();
 
@@ -453,56 +480,79 @@ function handleCreate_(ss, sheet, payload) {
     batchPhonesMap[vPhoneKey] = true;
   }
 
-  // التحقق الصارم من السعة المؤكدة للحجوزات الحقيقية
+  // التحقق الصارم من السعة المؤكدة للحجوزات الحقيقية (بشكل مستقل لكل باص ولكل قروب لوني مختار)
   const incomingCount = reg.members.length;
   if (!isTest) {
     const caps = computeConfirmedCapacities_(existingRegs);
-    const busConfirmed = caps.buses[busKey];
-    const busRemaining = Math.max(0, BUS_CAPACITY - busConfirmed);
-    if (busConfirmed >= BUS_CAPACITY) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        retryable: false,
-        error: 'البص اتملا — لا يمكن التسجيل في هذا الباص.',
-      });
-    }
-    if (incomingCount > busRemaining) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        retryable: false,
-        error:
-          'تم رفض التسجيل: العدد المطلوب (' +
-          incomingCount +
-          ' أفراد) أكبر من المقاعد المتاحة في ' +
-          BUS_LABELS[busKey] +
-          '. يمكنك تقليل عدد المرافقين أو اختيار الباص الآخر.',
-      });
+    var needBuses = { bus1: 0, bus2: 0 };
+    var needColors = { red: 0, blue: 0, yellow: 0, green: 0 };
+    for (var nc = 0; nc < incomingCount; nc++) {
+      needBuses[memberBusKeys[nc]] = (needBuses[memberBusKeys[nc]] || 0) + 1;
+      needColors[memberColorKeys[nc]] = (needColors[memberColorKeys[nc]] || 0) + 1;
     }
 
-    const colorConfirmed = caps.colors[colorKey];
-    const colorRemaining = Math.max(0, COLOR_GROUP_CAPACITY - colorConfirmed);
-    if (colorConfirmed >= COLOR_GROUP_CAPACITY) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        retryable: false,
-        error: 'القروب اتملا — لا يمكن التسجيل في هذا القروب.',
-      });
+    var busKeysToCheck = ['bus1', 'bus2'];
+    for (var bi = 0; bi < busKeysToCheck.length; bi++) {
+      var bKey = busKeysToCheck[bi];
+      var bNeed = needBuses[bKey] || 0;
+      if (bNeed === 0) continue;
+      var busConfirmed = caps.buses[bKey];
+      var busRemaining = Math.max(0, BUS_CAPACITY - busConfirmed);
+      if (busConfirmed >= BUS_CAPACITY) {
+        return jsonOutput_({
+          ok: false,
+          success: false,
+          retryable: false,
+          error: 'البص اتملا — لا يمكن التسجيل في ' + BUS_LABELS[bKey] + '.',
+        });
+      }
+      if (bNeed > busRemaining) {
+        return jsonOutput_({
+          ok: false,
+          success: false,
+          retryable: false,
+          error:
+            'تم رفض التسجيل: العدد المطلوب (' +
+            bNeed +
+            ' أفراد) أكبر من المقاعد المتاحة في ' +
+            BUS_LABELS[bKey] +
+            ' (المتبقي ' +
+            busRemaining +
+            ' مقعد فقط). يمكنك تغيير الباص لبعض الأفراد أو تقليل العدد.',
+        });
+      }
     }
-    if (incomingCount > colorRemaining) {
-      return jsonOutput_({
-        ok: false,
-        success: false,
-        retryable: false,
-        error:
-          'تم رفض التسجيل: العدد المطلوب (' +
-          incomingCount +
-          ' أفراد) أكبر من المقاعد المتاحة في قروب ' +
-          COLOR_LABELS[colorKey] +
-          '. يمكنك تقليل عدد المرافقين أو اختيار قروب لوني آخر.',
-      });
+
+    var colorKeysToCheck = ['red', 'blue', 'yellow', 'green'];
+    for (var ci = 0; ci < colorKeysToCheck.length; ci++) {
+      var cKey = colorKeysToCheck[ci];
+      var cNeed = needColors[cKey] || 0;
+      if (cNeed === 0) continue;
+      var colorConfirmed = caps.colors[cKey];
+      var colorRemaining = Math.max(0, COLOR_GROUP_CAPACITY - colorConfirmed);
+      if (colorConfirmed >= COLOR_GROUP_CAPACITY) {
+        return jsonOutput_({
+          ok: false,
+          success: false,
+          retryable: false,
+          error: 'القروب اتملا — لا يمكن التسجيل في قروب ' + COLOR_LABELS[cKey] + '.',
+        });
+      }
+      if (cNeed > colorRemaining) {
+        return jsonOutput_({
+          ok: false,
+          success: false,
+          retryable: false,
+          error:
+            'تم رفض التسجيل: العدد المطلوب (' +
+            cNeed +
+            ' أفراد) أكبر من المقاعد المتاحة في قروب ' +
+            COLOR_LABELS[cKey] +
+            ' (المتبقي ' +
+            colorRemaining +
+            ' مقعد فقط). يمكنك تغيير اللون لبعض الأفراد أو تقليل العدد.',
+        });
+      }
     }
   }
 
@@ -528,6 +578,8 @@ function handleCreate_(ss, sheet, payload) {
     var cleanPhone = String(m.phone || '').trim();
     var memberId = regId + '_' + i;
     var isMain = i === 0;
+    var mBusKey = memberBusKeys[i];
+    var mColorKey = memberColorKeys[i];
 
     cleanMembers.push({
       id: memberId,
@@ -536,6 +588,8 @@ function handleCreate_(ss, sheet, payload) {
       isMain: isMain,
       paid: false,
       cancelled: false,
+      bus: mBusKey,
+      colorGroup: mColorKey,
     });
 
     rowsToInsert.push([
@@ -546,8 +600,8 @@ function handleCreate_(ss, sheet, payload) {
       isMain ? 'رئيسي' : 'مرافق',
       'لم يدفع',
       'لا',
-      BUS_LABELS[busKey],
-      COLOR_LABELS[colorKey],
+      BUS_LABELS[mBusKey],
+      COLOR_LABELS[mColorKey],
       isGroup ? 'مجموعة' : 'فردي',
       RECIPIENT_LABELS[recipientKey],
       PAYMENT_LABELS[paymentKey],
@@ -620,25 +674,27 @@ function handleTogglePaid_(ss, sheet, regId, memberId) {
   const nextPaid = !targetMember.paid;
   if (nextPaid) {
     const caps = computeConfirmedCapacities_(allRegs);
-    if (caps.buses[targetReg.bus] >= BUS_CAPACITY) {
+    var mBus = targetMember.bus || targetReg.bus;
+    var mColor = targetMember.colorGroup || targetReg.colorGroup;
+    if (caps.buses[mBus] >= BUS_CAPACITY) {
       return jsonOutput_({
         ok: false,
         success: false,
         error:
           'لا يمكن تأكيد الدفع: ' +
-          BUS_LABELS[targetReg.bus] +
+          BUS_LABELS[mBus] +
           ' — البص اتملا (' +
           BUS_CAPACITY +
           ' فرد مؤكد).',
       });
     }
-    if (caps.colors[targetReg.colorGroup] >= COLOR_GROUP_CAPACITY) {
+    if (caps.colors[mColor] >= COLOR_GROUP_CAPACITY) {
       return jsonOutput_({
         ok: false,
         success: false,
         error:
           'لا يمكن تأكيد الدفع: قروب ' +
-          COLOR_LABELS[targetReg.colorGroup] +
+          COLOR_LABELS[mColor] +
           ' — القروب اتملا (' +
           COLOR_GROUP_CAPACITY +
           ' فرد مؤكد).',
@@ -714,49 +770,74 @@ function handleApproveAll_(ss, sheet, regId) {
   });
   if (!targetReg) return jsonOutput_({ ok: false, success: false, error: 'الحجز غير موجود.' });
 
-  const toApproveCount = targetReg.members.filter(function (m) {
+  const toApproveMembers = targetReg.members.filter(function (m) {
     return !m.cancelled && !m.paid;
-  }).length;
+  });
 
-  if (toApproveCount === 0) {
+  if (toApproveMembers.length === 0) {
     return jsonOutput_({ ok: true, success: true, registrations: allRegs });
   }
 
   const caps = computeConfirmedCapacities_(allRegs);
-  const busRemaining = Math.max(0, BUS_CAPACITY - caps.buses[targetReg.bus]);
-  if (toApproveCount > busRemaining) {
-    return jsonOutput_({
-      ok: false,
-      success: false,
-      error:
-        busRemaining === 0
-          ? 'لا يمكن تأكيد الدفع: ' + BUS_LABELS[targetReg.bus] + ' — البص اتملا.'
-          : 'لا يمكن تأكيد الكل (' +
-            toApproveCount +
-            ' أفراد): المتبقي في ' +
-            BUS_LABELS[targetReg.bus] +
-            ' هو ' +
-            busRemaining +
-            ' مقعد فقط.',
-    });
+  var needBuses = { bus1: 0, bus2: 0 };
+  var needColors = { red: 0, blue: 0, yellow: 0, green: 0 };
+  toApproveMembers.forEach(function (m) {
+    var mBus = m.bus || targetReg.bus;
+    var mColor = m.colorGroup || targetReg.colorGroup;
+    needBuses[mBus] = (needBuses[mBus] || 0) + 1;
+    needColors[mColor] = (needColors[mColor] || 0) + 1;
+  });
+
+  var bList = ['bus1', 'bus2'];
+  for (var bi = 0; bi < bList.length; bi++) {
+    var bKey = bList[bi];
+    var bNeed = needBuses[bKey] || 0;
+    if (bNeed === 0) continue;
+    var busRemaining = Math.max(0, BUS_CAPACITY - caps.buses[bKey]);
+    if (bNeed > busRemaining) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        error:
+          busRemaining === 0
+            ? 'لا يمكن تأكيد الدفع: ' + BUS_LABELS[bKey] + ' — البص اتملا.'
+            : 'لا يمكن تأكيد الكل (' +
+              bNeed +
+              ' أفراد في ' +
+              BUS_LABELS[bKey] +
+              '): المتبقي في ' +
+              BUS_LABELS[bKey] +
+              ' هو ' +
+              busRemaining +
+              ' مقعد فقط.',
+      });
+    }
   }
 
-  const colorRemaining = Math.max(0, COLOR_GROUP_CAPACITY - caps.colors[targetReg.colorGroup]);
-  if (toApproveCount > colorRemaining) {
-    return jsonOutput_({
-      ok: false,
-      success: false,
-      error:
-        colorRemaining === 0
-          ? 'لا يمكن تأكيد الدفع: قروب ' + COLOR_LABELS[targetReg.colorGroup] + ' — القروب اتملا.'
-          : 'لا يمكن تأكيد الكل (' +
-            toApproveCount +
-            ' أفراد): المتبقي في قروب ' +
-            COLOR_LABELS[targetReg.colorGroup] +
-            ' هو ' +
-            colorRemaining +
-            ' مقعد فقط.',
-    });
+  var cList = ['red', 'blue', 'yellow', 'green'];
+  for (var ci = 0; ci < cList.length; ci++) {
+    var cKey = cList[ci];
+    var cNeed = needColors[cKey] || 0;
+    if (cNeed === 0) continue;
+    var colorRemaining = Math.max(0, COLOR_GROUP_CAPACITY - caps.colors[cKey]);
+    if (cNeed > colorRemaining) {
+      return jsonOutput_({
+        ok: false,
+        success: false,
+        error:
+          colorRemaining === 0
+            ? 'لا يمكن تأكيد الدفع: قروب ' + COLOR_LABELS[cKey] + ' — القروب اتملا.'
+            : 'لا يمكن تأكيد الكل (' +
+              cNeed +
+              ' أفراد في قروب ' +
+              COLOR_LABELS[cKey] +
+              '): المتبقي في قروب ' +
+              COLOR_LABELS[cKey] +
+              ' هو ' +
+              colorRemaining +
+              ' مقعد فقط.',
+      });
+    }
   }
 
   const numRows = values.length;
@@ -1120,6 +1201,8 @@ function parseRegistrationsFromValues_(values) {
       isMain: isMain,
       paid: paid,
       cancelled: cancelled,
+      bus: bus,
+      colorGroup: colorGroup,
     });
   }
 

@@ -15,7 +15,9 @@ import {
   Users,
 } from 'lucide-react';
 import {
+  BUS_CAPACITY,
   BUS_LIST,
+  COLOR_GROUP_CAPACITY,
   COLOR_GROUP_LIST,
   LABELS,
   PAYMENT_METHOD_LIST,
@@ -32,6 +34,9 @@ import {
   buildWhatsAppDetails,
   formatEgyptianPhone,
   getActiveExistingSets,
+  getMemberBus,
+  getMemberColor,
+  hasMixedMemberAssignments,
   normalizeArabicText,
   normalizeDigits,
   normalizePhoneKey,
@@ -47,6 +52,10 @@ interface CompanionDraft {
   keyId: string;
   name: string;
   phone: string;
+  bus: BusKey | '';
+  colorGroup: ColorGroupKey | '';
+  busClickedFull: string;
+  colorClickedFull: string;
   nameTouched: boolean;
   phoneTouched: boolean;
 }
@@ -58,9 +67,277 @@ function createEmptyCompanion(): CompanionDraft {
     keyId: `comp_${Date.now()}_${companionKeySeq}`,
     name: '',
     phone: '',
+    bus: '',
+    colorGroup: '',
+    busClickedFull: '',
+    colorClickedFull: '',
     nameTouched: false,
     phoneTouched: false,
   };
+}
+
+function getArabicSeatWord(count: number): string {
+  return count >= 2 && count <= 10 ? 'مقاعد' : 'مقعد';
+}
+
+interface BusSelectorGridProps {
+  capacities: CapacityCounts;
+  value: BusKey | '';
+  clickedFullMessage: string;
+  onSelect: (key: BusKey) => void;
+  ariaLabel: string;
+  compact?: boolean;
+}
+
+function BusSelectorGrid({
+  capacities,
+  value,
+  clickedFullMessage,
+  onSelect,
+  ariaLabel,
+  compact = false,
+}: BusSelectorGridProps) {
+  return (
+    <div>
+      <div
+        className={`grid grid-cols-1 ${compact ? 'gap-2.5 sm:grid-cols-2' : 'gap-3 sm:grid-cols-2'}`}
+        role="radiogroup"
+        aria-label={ariaLabel}
+      >
+        {BUS_LIST.map((bus) => {
+          const stat = capacities.buses[bus.key];
+          const isSelected = value === bus.key;
+          const fillPercent = Math.min(100, Math.round((stat.confirmed / BUS_CAPACITY) * 100));
+          const remainingWord = getArabicSeatWord(stat.remaining);
+
+          return (
+            <button
+              key={bus.key}
+              type="button"
+              role="radio"
+              aria-checked={isSelected}
+              aria-disabled={stat.isFull}
+              onClick={() => onSelect(bus.key)}
+              className={`flex flex-col ${compact ? 'gap-2 p-3' : 'gap-2.5 p-4'} rounded-lg border text-right transition-colors ${
+                stat.isFull
+                  ? 'border-red-200 bg-red-50/50 text-[#7A6F64] cursor-not-allowed'
+                  : isSelected
+                    ? 'border-[#9A5B25] bg-[#FAF4EC] cursor-pointer'
+                    : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE] cursor-pointer'
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-2">
+                <span
+                  className={`flex items-center gap-2 font-display ${
+                    compact ? 'text-sm' : 'text-base'
+                  } font-bold text-[#1E1A16]`}
+                >
+                  <span
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                      stat.isFull
+                        ? 'border-red-300 bg-red-100'
+                        : isSelected
+                          ? 'border-[#9A5B25] bg-[#9A5B25]'
+                          : 'border-[#B9AFA2]'
+                    }`}
+                  >
+                    {isSelected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                  </span>
+                  <span>{bus.label}</span>
+                </span>
+
+                {stat.isFull ? (
+                  <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
+                    غير متاح
+                  </span>
+                ) : (
+                  <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
+                    متاح
+                  </span>
+                )}
+              </div>
+
+              <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
+                <span
+                  dir="ltr"
+                  className={`font-mono-num font-bold ${
+                    stat.isFull ? 'text-red-700' : 'text-[#7C4518]'
+                  }`}
+                >
+                  ({stat.confirmed}/{BUS_CAPACITY})
+                </span>
+                <span
+                  className={`font-semibold ${stat.isFull ? 'text-red-700' : 'text-[#4E463D]'}`}
+                >
+                  {stat.isFull
+                    ? 'متبقي 0 مقعد · البص اتملا'
+                    : `متبقي ${stat.remaining} ${remainingWord}`}
+                </span>
+              </div>
+
+              <svg
+                viewBox="0 0 100 4"
+                preserveAspectRatio="none"
+                className="h-1.5 w-full overflow-hidden rounded-full"
+                aria-hidden="true"
+              >
+                <rect x="0" y="0" width="100" height="4" rx="2" className="fill-[#ECE6DC]" />
+                <rect
+                  x={100 - fillPercent}
+                  y="0"
+                  width={fillPercent}
+                  height="4"
+                  rx="2"
+                  className={stat.isFull ? 'fill-red-600' : 'fill-[#9A5B25]'}
+                />
+              </svg>
+            </button>
+          );
+        })}
+      </div>
+
+      {clickedFullMessage && (
+        <p className="mt-2 flex items-center gap-1.5 text-xs font-bold text-red-700">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span>{clickedFullMessage}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+interface ColorSelectorGridProps {
+  capacities: CapacityCounts;
+  value: ColorGroupKey | '';
+  clickedFullMessage: string;
+  onSelect: (key: ColorGroupKey) => void;
+  ariaLabel: string;
+  compact?: boolean;
+}
+
+function ColorSelectorGrid({
+  capacities,
+  value,
+  clickedFullMessage,
+  onSelect,
+  ariaLabel,
+  compact = false,
+}: ColorSelectorGridProps) {
+  return (
+    <div>
+      <div
+        className={`grid grid-cols-1 ${compact ? 'gap-2 sm:grid-cols-2' : 'gap-3 sm:grid-cols-2'}`}
+        role="radiogroup"
+        aria-label={ariaLabel}
+      >
+        {COLOR_GROUP_LIST.map((group) => {
+          const stat = capacities.colors[group.key];
+          const isSelected = value === group.key;
+          const fillPercent = Math.min(
+            100,
+            Math.round((stat.confirmed / COLOR_GROUP_CAPACITY) * 100)
+          );
+          const remainingWord = getArabicSeatWord(stat.remaining);
+
+          return (
+            <button
+              key={group.key}
+              type="button"
+              role="radio"
+              aria-checked={isSelected}
+              aria-disabled={stat.isFull}
+              onClick={() => onSelect(group.key)}
+              className={`flex flex-col ${
+                compact ? 'gap-1.5 px-3 py-2.5' : 'gap-2.5 px-4 py-3.5'
+              } rounded-lg border text-right transition-colors ${
+                stat.isFull
+                  ? 'border-red-200 bg-red-50/50 cursor-not-allowed'
+                  : isSelected
+                    ? `${group.borderClass} ${group.softBgClass} cursor-pointer`
+                    : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE] cursor-pointer'
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <span
+                    className={`h-3.5 w-3.5 shrink-0 rounded-sm ${group.swatchClass} ${
+                      stat.isFull ? 'opacity-50' : ''
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <p className="font-display text-sm font-bold text-[#1E1A16]">
+                    قروب {group.label}
+                  </p>
+                </div>
+
+                {stat.isFull ? (
+                  <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
+                    غير متاح
+                  </span>
+                ) : (
+                  <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
+                    متاح
+                  </span>
+                )}
+              </div>
+
+              <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
+                <span
+                  dir="ltr"
+                  className={`font-mono-num font-bold ${
+                    stat.isFull ? 'text-red-700' : 'text-[#5C5349]'
+                  }`}
+                >
+                  ({stat.confirmed}/{COLOR_GROUP_CAPACITY})
+                </span>
+                <span
+                  className={`font-semibold ${stat.isFull ? 'text-red-700' : 'text-[#4E463D]'}`}
+                >
+                  {stat.isFull
+                    ? 'متبقي 0 مقعد · القروب اتملا'
+                    : `متبقي ${stat.remaining} ${remainingWord}`}
+                </span>
+              </div>
+
+              <svg
+                viewBox="0 0 100 4"
+                preserveAspectRatio="none"
+                className="h-1.5 w-full overflow-hidden rounded-full"
+                aria-hidden="true"
+              >
+                <rect x="0" y="0" width="100" height="4" rx="2" className="fill-[#ECE6DC]" />
+                <rect
+                  x={100 - fillPercent}
+                  y="0"
+                  width={fillPercent}
+                  height="4"
+                  rx="2"
+                  className={
+                    stat.isFull
+                      ? 'fill-red-600'
+                      : group.key === 'red'
+                        ? 'fill-red-600'
+                        : group.key === 'blue'
+                          ? 'fill-blue-600'
+                          : group.key === 'yellow'
+                            ? 'fill-amber-500'
+                            : 'fill-emerald-600'
+                  }
+                />
+              </svg>
+            </button>
+          );
+        })}
+      </div>
+
+      {clickedFullMessage && (
+        <p className="mt-2 flex items-center gap-1.5 text-xs font-bold text-red-700">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span>{clickedFullMessage}</span>
+        </p>
+      )}
+    </div>
+  );
 }
 
 export interface SubmitBookingResult {
@@ -141,9 +418,37 @@ export function RegistrationView({
   }, [capacities.colors, colorGroup]);
 
   useEffect(() => {
+    if (regType !== 'group') return;
+    setCompanions((prev) => {
+      let changed = false;
+      const next = prev.map((comp) => {
+        let updated = comp;
+        if (comp.bus && capacities.buses[comp.bus].isFull) {
+          changed = true;
+          updated = {
+            ...updated,
+            bus: '',
+            busClickedFull: 'البص اتملا — يرجى اختيار الباص الآخر المتاح',
+          };
+        }
+        if (comp.colorGroup && capacities.colors[comp.colorGroup].isFull) {
+          changed = true;
+          updated = {
+            ...updated,
+            colorGroup: '',
+            colorClickedFull: 'القروب اتملا — يرجى اختيار قروب لوني آخر متاح',
+          };
+        }
+        return updated;
+      });
+      return changed ? next : prev;
+    });
+  }, [capacities, regType]);
+
+  useEffect(() => {
     if (formError) setFormError('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalPersons, busChoice, colorGroup, paymentMethod, fullName, phoneDigits, companions]);
+  }, [totalPersons, busChoice, colorGroup, paymentMethod, fullName, phoneDigits, companions, regType]);
 
   const existingActiveSets = useMemo(
     () => getActiveExistingSets(registrations),
@@ -203,15 +508,45 @@ export function RegistrationView({
   const mainPhoneError = getMemberPhoneError(phoneDigits);
   const mainPhoneValid = mainPhoneError === '';
 
-  const selectedBusStat = busChoice ? capacities.buses[busChoice] : null;
-  const selectedBusInsufficient = Boolean(
-    selectedBusStat && !selectedBusStat.isFull && totalPersons > selectedBusStat.remaining
-  );
+  const selectionDemand = useMemo(() => {
+    const buses: Record<BusKey, number> = { bus1: 0, bus2: 0 };
+    const colors: Record<ColorGroupKey, number> = { red: 0, blue: 0, yellow: 0, green: 0 };
 
-  const selectedColorStat = colorGroup ? capacities.colors[colorGroup] : null;
-  const selectedColorInsufficient = Boolean(
-    selectedColorStat && !selectedColorStat.isFull && totalPersons > selectedColorStat.remaining
-  );
+    if (busChoice) buses[busChoice] += 1;
+    if (colorGroup) colors[colorGroup] += 1;
+
+    if (regType === 'group') {
+      for (const comp of companions) {
+        if (comp.bus) buses[comp.bus] += 1;
+        if (comp.colorGroup) colors[comp.colorGroup] += 1;
+      }
+    }
+
+    return { buses, colors };
+  }, [busChoice, colorGroup, regType, companions]);
+
+  const capacityOverflowMessages = useMemo(() => {
+    const msgs: string[] = [];
+    for (const b of BUS_LIST) {
+      const need = selectionDemand.buses[b.key];
+      const stat = capacities.buses[b.key];
+      if (need > 0 && !stat.isFull && need > stat.remaining) {
+        msgs.push(
+          `لا يمكن تسجيل ${need} أفراد في ${b.label} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير الباص لبعض الأفراد.`
+        );
+      }
+    }
+    for (const c of COLOR_GROUP_LIST) {
+      const need = selectionDemand.colors[c.key];
+      const stat = capacities.colors[c.key];
+      if (need > 0 && !stat.isFull && need > stat.remaining) {
+        msgs.push(
+          `لا يمكن تسجيل ${need} أفراد في قروب ${c.label} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير اللون لبعض الأفراد.`
+        );
+      }
+    }
+    return msgs;
+  }, [selectionDemand, capacities]);
 
   const scrollToForm = () => {
     const formSection = document.getElementById('registration-form');
@@ -258,6 +593,24 @@ export function RegistrationView({
     setColorGroup(key);
   };
 
+  const handleSelectCompanionBus = (keyId: string, key: BusKey) => {
+    const stat = capacities.buses[key];
+    if (stat.isFull) {
+      updateCompanion(keyId, { busClickedFull: 'البص اتملا' });
+      return;
+    }
+    updateCompanion(keyId, { bus: key, busClickedFull: '' });
+  };
+
+  const handleSelectCompanionColor = (keyId: string, key: ColorGroupKey) => {
+    const stat = capacities.colors[key];
+    if (stat.isFull) {
+      updateCompanion(keyId, { colorClickedFull: 'القروب اتملا' });
+      return;
+    }
+    updateCompanion(keyId, { colorGroup: key, colorClickedFull: '' });
+  };
+
   const resetForm = () => {
     setFullName('');
     setNameTouched(false);
@@ -296,6 +649,38 @@ export function RegistrationView({
       return;
     }
 
+    if (!busChoice) {
+      setFormError(
+        regType === 'group'
+          ? 'يرجى اختيار الباص للمشترك الرئيسي'
+          : 'يرجى اختيار باص واحد متاح للرحلة'
+      );
+      return;
+    }
+
+    const mainBusStat = capacities.buses[busChoice];
+    if (mainBusStat.isFull) {
+      setBusClickedFull('البص اتملا');
+      setFormError('البص اتملا — لا يمكن إتمام التسجيل في هذا الباص');
+      return;
+    }
+
+    if (!colorGroup) {
+      setFormError(
+        regType === 'group'
+          ? 'يرجى اختيار القروب اللوني للمشترك الرئيسي'
+          : 'يرجى اختيار قروب لوني واحد متاح'
+      );
+      return;
+    }
+
+    const mainColorStat = capacities.colors[colorGroup];
+    if (mainColorStat.isFull) {
+      setColorClickedFull('القروب اتملا');
+      setFormError('القروب اتملا — لا يمكن إتمام التسجيل في هذا القروب');
+      return;
+    }
+
     if (regType === 'group') {
       for (let i = 0; i < companions.length; i++) {
         const comp = companions[i];
@@ -309,42 +694,29 @@ export function RegistrationView({
           setFormError(`المرافق ${i + 1}: ${cPhoneErr}`);
           return;
         }
+        if (!comp.bus) {
+          setFormError(`المرافق ${i + 1}: يرجى اختيار الباص`);
+          return;
+        }
+        if (capacities.buses[comp.bus].isFull) {
+          updateCompanion(comp.keyId, { busClickedFull: 'البص اتملا' });
+          setFormError(`المرافق ${i + 1}: البص اتملا — يرجى اختيار الباص الآخر`);
+          return;
+        }
+        if (!comp.colorGroup) {
+          setFormError(`المرافق ${i + 1}: يرجى اختيار القروب اللوني`);
+          return;
+        }
+        if (capacities.colors[comp.colorGroup].isFull) {
+          updateCompanion(comp.keyId, { colorClickedFull: 'القروب اتملا' });
+          setFormError(`المرافق ${i + 1}: القروب اتملا — يرجى اختيار قروب لوني آخر`);
+          return;
+        }
       }
     }
 
-    if (!busChoice) {
-      setFormError('يرجى اختيار باص واحد متاح للرحلة');
-      return;
-    }
-
-    const busStat = capacities.buses[busChoice];
-    if (busStat.isFull) {
-      setBusClickedFull('البص اتملا');
-      setFormError('البص اتملا — لا يمكن إتمام التسجيل في هذا الباص');
-      return;
-    }
-    if (totalPersons > busStat.remaining) {
-      setFormError(
-        `تم رفض التسجيل: العدد المطلوب (${totalPersons} أفراد) أكبر من المقاعد المتاحة في ${LABELS.buses[busChoice]}. يمكنك تقليل عدد المرافقين أو اختيار الباص الآخر.`
-      );
-      return;
-    }
-
-    if (!colorGroup) {
-      setFormError('يرجى اختيار قروب لوني واحد متاح');
-      return;
-    }
-
-    const colorStat = capacities.colors[colorGroup];
-    if (colorStat.isFull) {
-      setColorClickedFull('القروب اتملا');
-      setFormError('القروب اتملا — لا يمكن إتمام التسجيل في هذا القروب');
-      return;
-    }
-    if (totalPersons > colorStat.remaining) {
-      setFormError(
-        `تم رفض التسجيل: العدد المطلوب (${totalPersons} أفراد) أكبر من المقاعد المتاحة في قروب ${LABELS.colors[colorGroup]}. يمكنك تقليل عدد المرافقين أو اختيار قروب لوني آخر.`
-      );
+    if (capacityOverflowMessages.length > 0) {
+      setFormError(capacityOverflowMessages[0]);
       return;
     }
 
@@ -362,11 +734,15 @@ export function RegistrationView({
         isMain: true,
         paid: false,
         cancelled: false,
+        bus: busChoice,
+        colorGroup,
       },
     ];
 
     if (regType === 'group') {
       companions.forEach((comp, idx) => {
+        const cBus = comp.bus as BusKey;
+        const cColor = comp.colorGroup as ColorGroupKey;
         members.push({
           id: `${regId}_${idx + 1}`,
           name: comp.name.trim().replace(/\s+/g, ' '),
@@ -374,6 +750,8 @@ export function RegistrationView({
           isMain: false,
           paid: false,
           cancelled: false,
+          bus: cBus,
+          colorGroup: cColor,
         });
       });
     }
@@ -537,8 +915,9 @@ export function RegistrationView({
               <div>
                 <p className="text-xs text-[#6B6155]">الباص والمجموعة</p>
                 <p className="mt-1 font-bold text-[#1E1A16]">
-                  {LABELS.buses[confirmedBooking.bus]} · قروب{' '}
-                  {LABELS.colors[confirmedBooking.colorGroup]}
+                  {hasMixedMemberAssignments(confirmedBooking)
+                    ? 'متعدد (موضح لكل فرد أدناه)'
+                    : `${LABELS.buses[confirmedBooking.bus]} · قروب ${LABELS.colors[confirmedBooking.colorGroup]}`}
                 </p>
               </div>
               <div>
@@ -567,22 +946,37 @@ export function RegistrationView({
             <div className="mt-5">
               <p className="text-xs font-semibold text-[#6B6155]">الأفراد المسجلون في هذا الحجز</p>
               <div className="mt-2 divide-y divide-[#EFEAE1] rounded-lg border border-[#E4DDD2] bg-[#FAF8F4]">
-                {confirmedBooking.members.map((m) => (
-                  <div
-                    key={m.id}
-                    className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm"
-                  >
-                    <span className="font-semibold text-[#1E1A16]">
-                      {m.name}{' '}
-                      <span className="text-xs font-normal text-[#6B6155]">
-                        ({m.isMain ? 'المشترك الرئيسي' : 'مرافق'})
+                {confirmedBooking.members.map((m) => {
+                  const mBus = getMemberBus(m, confirmedBooking);
+                  const mColor = getMemberColor(m, confirmedBooking);
+                  const mColorMeta = COLOR_GROUP_LIST.find((c) => c.key === mColor);
+                  return (
+                    <div
+                      key={m.id}
+                      className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-[#1E1A16]">
+                          {m.name}{' '}
+                          <span className="text-xs font-normal text-[#6B6155]">
+                            ({m.isMain ? 'المشترك الرئيسي' : 'مرافق'})
+                          </span>
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded border border-[#E4DDD2] bg-white px-2 py-0.5 text-xs font-semibold text-[#4E463D]">
+                          <span>{LABELS.buses[mBus]}</span>
+                          <span aria-hidden="true">·</span>
+                          {mColorMeta && (
+                            <span className={`h-2 w-2 rounded-xs ${mColorMeta.swatchClass}`} />
+                          )}
+                          <span>قروب {LABELS.colors[mColor]}</span>
+                        </span>
+                      </div>
+                      <span className="font-mono-num text-xs text-[#4E463D]" dir="ltr">
+                        {m.phone}
                       </span>
-                    </span>
-                    <span className="font-mono-num text-xs text-[#4E463D]" dir="ltr">
-                      {m.phone}
-                    </span>
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -662,10 +1056,61 @@ export function RegistrationView({
               </p>
             </div>
 
-            {/* Section 1: Main Attendee */}
+            {/* Section 1: Registration Type */}
             <div>
+              <h3 className="font-display text-lg font-bold text-[#1E1A16]">1. نوع التسجيل</h3>
+
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setRegType('self')}
+                  aria-pressed={regType === 'self'}
+                  className={`flex items-center gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors cursor-pointer ${
+                    regType === 'self'
+                      ? 'border-[#9A5B25] bg-[#FAF4EC] text-[#1E1A16]'
+                      : 'border-[#E4DDD2] bg-white text-[#5C5349] hover:border-[#C8BCAE]'
+                  }`}
+                >
+                  <UserPlus
+                    className={`h-5 w-5 shrink-0 ${
+                      regType === 'self' ? 'text-[#9A5B25]' : 'text-[#8C8173]'
+                    }`}
+                  />
+                  <div>
+                    <p className="text-sm font-bold text-[#1E1A16]">تسجيل فردي (لنفسي فقط)</p>
+                    <p className="text-xs text-[#6B6155]">فرد واحد · 250 جنيه</p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setRegType('group')}
+                  aria-pressed={regType === 'group'}
+                  className={`flex items-center gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors cursor-pointer ${
+                    regType === 'group'
+                      ? 'border-[#9A5B25] bg-[#FAF4EC] text-[#1E1A16]'
+                      : 'border-[#E4DDD2] bg-white text-[#5C5349] hover:border-[#C8BCAE]'
+                  }`}
+                >
+                  <Users
+                    className={`h-5 w-5 shrink-0 ${
+                      regType === 'group' ? 'text-[#9A5B25]' : 'text-[#8C8173]'
+                    }`}
+                  />
+                  <div>
+                    <p className="text-sm font-bold text-[#1E1A16]">تسجيل لمجموعة</p>
+                    <p className="text-xs text-[#6B6155]">
+                      أنت + إضافة أي عدد من المرافقين — يمكن لكل شخص اختيار الباص والقروب اللوني الخاص به
+                    </p>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Section 2: Main Attendee (Always directly below Registration Type) */}
+            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
               <h3 className="font-display text-lg font-bold text-[#1E1A16]">
-                1. بيانات المشترك الرئيسي
+                2. بيانات المشترك الرئيسي
               </h3>
               <p className="mt-1 text-xs text-[#6B6155]">
                 يجب كتابة الاسم ثلاثياً فقط، ورقم الهاتف مصرياً مكوناً من 10 أرقام بعد كود مصر +20.
@@ -778,68 +1223,68 @@ export function RegistrationView({
                   </div>
                 </div>
               </div>
-            </div>
-
-            {/* Section 2: Registration Type & Companions */}
-            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
-              <h3 className="font-display text-lg font-bold text-[#1E1A16]">2. نوع التسجيل</h3>
-
-              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={() => setRegType('self')}
-                  aria-pressed={regType === 'self'}
-                  className={`flex items-center gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors cursor-pointer ${
-                    regType === 'self'
-                      ? 'border-[#9A5B25] bg-[#FAF4EC] text-[#1E1A16]'
-                      : 'border-[#E4DDD2] bg-white text-[#5C5349] hover:border-[#C8BCAE]'
-                  }`}
-                >
-                  <UserPlus
-                    className={`h-5 w-5 shrink-0 ${
-                      regType === 'self' ? 'text-[#9A5B25]' : 'text-[#8C8173]'
-                    }`}
-                  />
-                  <div>
-                    <p className="text-sm font-bold text-[#1E1A16]">تسجيل فردي (لنفسي فقط)</p>
-                    <p className="text-xs text-[#6B6155]">فرد واحد · 250 جنيه</p>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setRegType('group')}
-                  aria-pressed={regType === 'group'}
-                  className={`flex items-center gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors cursor-pointer ${
-                    regType === 'group'
-                      ? 'border-[#9A5B25] bg-[#FAF4EC] text-[#1E1A16]'
-                      : 'border-[#E4DDD2] bg-white text-[#5C5349] hover:border-[#C8BCAE]'
-                  }`}
-                >
-                  <Users
-                    className={`h-5 w-5 shrink-0 ${
-                      regType === 'group' ? 'text-[#9A5B25]' : 'text-[#8C8173]'
-                    }`}
-                  />
-                  <div>
-                    <p className="text-sm font-bold text-[#1E1A16]">تسجيل لمجموعة</p>
-                    <p className="text-xs text-[#6B6155]">
-                      أنت + إضافة أي عدد من المرافقين في نفس الباص ونفس القروب
-                    </p>
-                  </div>
-                </button>
-              </div>
 
               {regType === 'group' && (
-                <div className="mt-5 rounded-lg border border-[#E4DDD2] bg-[#FAF8F4] p-5">
+                <div className="mt-5 space-y-4 rounded-lg border border-[#E4DDD2] bg-[#FAF8F4] p-4">
+                  <div>
+                    <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                      <p className="text-xs font-bold text-[#1E1A16]">
+                        اختيار الباص للمشترك الرئيسي <span className="text-red-600">*</span>
+                      </p>
+                      <span className="text-[11px] text-[#6B6155]">
+                        لا يُحتسب المقعد إلا بعد تأكيد الدفع من المنظمين
+                      </span>
+                    </div>
+                    <BusSelectorGrid
+                      capacities={capacities}
+                      value={busChoice}
+                      clickedFullMessage={busClickedFull}
+                      onSelect={handleSelectBus}
+                      ariaLabel="اختيار الباص للمشترك الرئيسي"
+                      compact
+                    />
+                    {submitAttempted && !busChoice && (
+                      <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-red-700">
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                        <span>يرجى اختيار الباص للمشترك الرئيسي</span>
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <p className="mb-2 text-xs font-bold text-[#1E1A16]">
+                      تحديد المجموعة اللونية للمشترك الرئيسي <span className="text-red-600">*</span>
+                    </p>
+                    <ColorSelectorGrid
+                      capacities={capacities}
+                      value={colorGroup}
+                      clickedFullMessage={colorClickedFull}
+                      onSelect={handleSelectColor}
+                      ariaLabel="تحديد المجموعة اللونية للمشترك الرئيسي"
+                      compact
+                    />
+                    {submitAttempted && !colorGroup && (
+                      <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-red-700">
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                        <span>يرجى اختيار القروب اللوني للمشترك الرئيسي</span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Section 3 (Group Mode): Companions directly below Main Attendee */}
+            {regType === 'group' && (
+              <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+                <div className="rounded-lg border border-[#E4DDD2] bg-[#FAF8F4] p-5">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                      <h4 className="font-display text-base font-bold text-[#1E1A16]">
-                        بيانات المرافقين
-                      </h4>
-                      <p className="text-xs text-[#6B6155]">
-                        أضف كل شخص مرافق معك بالضغط على «إضافة شخص جديد» — سيتم تسجيل الجميع معاً في
-                        نفس الباص ونفس قروب الألوان.
+                      <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                        3. بيانات المرافقين
+                      </h3>
+                      <p className="mt-0.5 text-xs text-[#6B6155]">
+                        أضف كل شخص مرافق معك بالضغط على «إضافة شخص جديد» — ويمكن لكل شخص اختيار الباص والمجموعة اللونية الخاصة به بشكل مستقل.
                       </p>
                     </div>
                     <div className="flex items-center gap-2 rounded-lg border border-[#E4DDD2] bg-white px-3.5 py-2 text-xs font-semibold text-[#4E463D] shrink-0">
@@ -975,6 +1420,50 @@ export function RegistrationView({
                               </div>
                             </div>
                           </div>
+
+                          {/* Per-Companion Bus & Color Selection */}
+                          <div className="mt-4 space-y-3.5 rounded-lg border border-[#E4DDD2] bg-white/80 p-3.5">
+                            <div>
+                              <p className="mb-2 text-xs font-bold text-[#1E1A16]">
+                                اختيار الباص (المرافق {idx + 1}) <span className="text-red-600">*</span>
+                              </p>
+                              <BusSelectorGrid
+                                capacities={capacities}
+                                value={comp.bus}
+                                clickedFullMessage={comp.busClickedFull}
+                                onSelect={(bKey) => handleSelectCompanionBus(comp.keyId, bKey)}
+                                ariaLabel={`اختيار الباص للمرافق ${idx + 1}`}
+                                compact
+                              />
+                              {submitAttempted && !comp.bus && (
+                                <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-red-700">
+                                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                                  <span>يرجى اختيار الباص للمرافق {idx + 1}</span>
+                                </p>
+                              )}
+                            </div>
+
+                            <div>
+                              <p className="mb-2 text-xs font-bold text-[#1E1A16]">
+                                تحديد المجموعة اللونية (المرافق {idx + 1}){' '}
+                                <span className="text-red-600">*</span>
+                              </p>
+                              <ColorSelectorGrid
+                                capacities={capacities}
+                                value={comp.colorGroup}
+                                clickedFullMessage={comp.colorClickedFull}
+                                onSelect={(cKey) => handleSelectCompanionColor(comp.keyId, cKey)}
+                                ariaLabel={`تحديد المجموعة اللونية للمرافق ${idx + 1}`}
+                                compact
+                              />
+                              {submitAttempted && !comp.colorGroup && (
+                                <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-red-700">
+                                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                                  <span>يرجى اختيار القروب اللوني للمرافق {idx + 1}</span>
+                                </p>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       );
                     })}
@@ -991,175 +1480,77 @@ export function RegistrationView({
                     </button>
                   </div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
-            {/* Section 3: Single Bus Selection */}
+            {/* Section 3 & 4: Bus & Color Selection (Individual Mode Only — in Group Mode each member chooses directly under their own Name & Phone) */}
+            {regType === 'self' && (
+              <>
+                <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                      3. اختيار الباص <span className="text-red-600">*</span>
+                    </h3>
+                    <span className="text-xs text-[#6B6155]">
+                      اختر باصاً واحداً فقط · لا يُحتسب المقعد إلا بعد تأكيد الدفع من المنظمين
+                    </span>
+                  </div>
+
+                  <div className="mt-4">
+                    <BusSelectorGrid
+                      capacities={capacities}
+                      value={busChoice}
+                      clickedFullMessage={busClickedFull}
+                      onSelect={handleSelectBus}
+                      ariaLabel="اختيار الباص"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-8 border-t border-[#ECE6DC] pt-7">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h3 className="font-display text-lg font-bold text-[#1E1A16]">
+                      4. تحديد المجموعة اللونية <span className="text-red-600">*</span>
+                    </h3>
+                    <span className="text-xs text-[#6B6155]">
+                      اختر لوناً واحداً فقط · لا يُحتسب المقعد إلا بعد تأكيد الدفع من المنظمين
+                    </span>
+                  </div>
+
+                  <div className="mt-4">
+                    <ColorSelectorGrid
+                      capacities={capacities}
+                      value={colorGroup}
+                      clickedFullMessage={colorClickedFull}
+                      onSelect={handleSelectColor}
+                      ariaLabel="تحديد المجموعة اللونية"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {capacityOverflowMessages.length > 0 && (
+              <div className="mt-6 space-y-2">
+                {capacityOverflowMessages.map((msg, idx) => (
+                  <p
+                    key={idx}
+                    className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-bold text-red-800"
+                  >
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>{msg}</span>
+                  </p>
+                ))}
+              </div>
+            )}
+
+            {/* Payment Method with Icons & Automatic Organizer Assignment */}
             <div className="mt-8 border-t border-[#ECE6DC] pt-7">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="font-display text-lg font-bold text-[#1E1A16]">
-                  3. اختيار الباص <span className="text-red-600">*</span>
+                  {regType === 'group' ? '4' : '5'}. اختيار طريقة الدفع{' '}
+                  <span className="text-red-600">*</span>
                 </h3>
-                <span className="text-xs text-[#6B6155]">اختر باصاً واحداً فقط</span>
-              </div>
-
-              <div
-                className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2"
-                role="radiogroup"
-                aria-label="اختيار الباص"
-              >
-                {BUS_LIST.map((bus) => {
-                  const stat = capacities.buses[bus.key];
-                  const isSelected = busChoice === bus.key;
-
-                  return (
-                    <button
-                      key={bus.key}
-                      type="button"
-                      role="radio"
-                      aria-checked={isSelected}
-                      aria-disabled={stat.isFull}
-                      onClick={() => handleSelectBus(bus.key)}
-                      className={`flex items-center justify-between gap-3 rounded-lg border p-4 text-right transition-colors ${
-                        stat.isFull
-                          ? 'border-red-200 bg-red-50/50 text-[#7A6F64] cursor-not-allowed'
-                          : isSelected
-                            ? 'border-[#9A5B25] bg-[#FAF4EC] cursor-pointer'
-                            : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE] cursor-pointer'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2.5 font-display text-base font-bold text-[#1E1A16]">
-                        <span
-                          className={`flex h-4 w-4 items-center justify-center rounded-full border ${
-                            stat.isFull
-                              ? 'border-red-300 bg-red-100'
-                              : isSelected
-                                ? 'border-[#9A5B25] bg-[#9A5B25]'
-                                : 'border-[#B9AFA2]'
-                          }`}
-                        >
-                          {isSelected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                        </span>
-                        <span>{bus.label}</span>
-                      </span>
-
-                      {stat.isFull ? (
-                        <span className="text-xs font-extrabold text-red-700">غير متاح</span>
-                      ) : (
-                        <span className="text-xs font-semibold text-emerald-700">متاح</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {busClickedFull && (
-                <p className="mt-2.5 flex items-center gap-1.5 text-sm font-bold text-red-700">
-                  <AlertCircle className="h-4 w-4 shrink-0" />
-                  <span>{busClickedFull}</span>
-                </p>
-              )}
-
-              {selectedBusInsufficient && busChoice && (
-                <p className="mt-2.5 flex items-start gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-bold text-red-800">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>
-                    لا يمكن التسجيل بهذا العدد في {LABELS.buses[busChoice]} — العدد المتاح لا يكفي
-                    لعدد الأفراد ({totalPersons}). يمكنك تقليل عدد المرافقين بالأعلى أو اختيار الباص
-                    الآخر.
-                  </span>
-                </p>
-              )}
-            </div>
-
-            {/* Section 4: Single Color Group Selection */}
-            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h3 className="font-display text-lg font-bold text-[#1E1A16]">
-                  4. تحديد المجموعة اللونية <span className="text-red-600">*</span>
-                </h3>
-                <span className="text-xs text-[#6B6155]">اختر لوناً واحداً فقط</span>
-              </div>
-
-              <div
-                className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2"
-                role="radiogroup"
-                aria-label="تحديد المجموعة اللونية"
-              >
-                {COLOR_GROUP_LIST.map((group) => {
-                  const stat = capacities.colors[group.key];
-                  const isSelected = colorGroup === group.key;
-
-                  return (
-                    <button
-                      key={group.key}
-                      type="button"
-                      role="radio"
-                      aria-checked={isSelected}
-                      aria-disabled={stat.isFull}
-                      onClick={() => handleSelectColor(group.key)}
-                      className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-3.5 text-right transition-colors ${
-                        stat.isFull
-                          ? 'border-red-200 bg-red-50/50 cursor-not-allowed'
-                          : isSelected
-                            ? `${group.borderClass} ${group.softBgClass} cursor-pointer`
-                            : 'border-[#E4DDD2] bg-white hover:border-[#C8BCAE] cursor-pointer'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`h-4 w-4 shrink-0 rounded-sm ${group.swatchClass} ${
-                            stat.isFull ? 'opacity-50' : ''
-                          }`}
-                          aria-hidden="true"
-                        />
-                        <p className="font-display text-sm font-bold text-[#1E1A16]">
-                          قروب {group.label}
-                        </p>
-                      </div>
-
-                      {stat.isFull ? (
-                        <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
-                          غير متاح
-                        </span>
-                      ) : (
-                        <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
-                          متاح
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {colorClickedFull && (
-                <p className="mt-2.5 flex items-center gap-1.5 text-sm font-bold text-red-700">
-                  <AlertCircle className="h-4 w-4 shrink-0" />
-                  <span>{colorClickedFull}</span>
-                </p>
-              )}
-
-              {selectedColorInsufficient && colorGroup && (
-                <p className="mt-2.5 flex items-start gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-bold text-red-800">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>
-                    لا يمكن التسجيل بهذا العدد في قروب {LABELS.colors[colorGroup]} — العدد المتاح لا
-                    يكفي لعدد الأفراد ({totalPersons}). يمكنك تقليل عدد المرافقين بالأعلى أو اختيار
-                    قروب لوني آخر.
-                  </span>
-                </p>
-              )}
-            </div>
-
-            {/* Section 5: Payment Method with Icons & Automatic Organizer Assignment */}
-            <div className="mt-8 border-t border-[#ECE6DC] pt-7">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h3 className="font-display text-lg font-bold text-[#1E1A16]">
-                  5. اختيار طريقة الدفع <span className="text-red-600">*</span>
-                </h3>
-                <span className="text-xs text-[#6B6155]">
-                  يظهر المسؤول ورقم التحويل تلقائياً حسب وسيلة الدفع المختارة
-                </span>
               </div>
 
               <div

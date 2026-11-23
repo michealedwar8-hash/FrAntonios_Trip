@@ -10,7 +10,10 @@ import {
   type RegistrationRecord,
 } from '../types/trip';
 import {
+  getMemberBus,
+  getMemberColor,
   getRegSummary,
+  hasMixedMemberAssignments,
   normalizeArabicText,
   normalizePhoneKey,
   type CapacityCounts,
@@ -208,6 +211,7 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
 }: RegistrationTableRowProps) {
   const summary = getRegSummary(reg);
   const allCancelled = summary.activeCount === 0;
+  const mixedAssignments = hasMixedMemberAssignments(reg);
   const colorMeta = COLOR_GROUP_LIST.find((c) => c.key === reg.colorGroup);
 
   const rowHasDuplicate = reg.members.some((m) => {
@@ -337,6 +341,24 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
                     >
                       {m.cancelled ? 'ملغي' : m.paid ? 'مدفوع' : 'لم يدفع'}
                     </span>
+                    {reg.isGroup && (() => {
+                      const mBus = getMemberBus(m, reg);
+                      const mColor = getMemberColor(m, reg);
+                      const mColorMeta = COLOR_GROUP_LIST.find((c) => c.key === mColor);
+                      return (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-1 rounded border border-[#E4DDD2] bg-[#FAF8F4] px-1.5 py-0.5 text-[11px] font-semibold text-[#1E1A16]">
+                            <span>{LABELS.buses[mBus]}</span>
+                            <span aria-hidden="true">·</span>
+                            {mColorMeta && (
+                              <span className={`h-2 w-2 rounded-xs ${mColorMeta.swatchClass}`} />
+                            )}
+                            <span>قروب {LABELS.colors[mColor]}</span>
+                          </span>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
 
@@ -422,12 +444,41 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
 
       {/* Bus & Color */}
       <td className="px-4 py-3.5 whitespace-nowrap">
-        <p className="font-bold text-[#1E1A16]">{LABELS.buses[reg.bus]}</p>
-        <p className="mt-1 flex items-center gap-1.5 text-xs text-[#4E463D]">
-          {colorMeta && <span className={`h-2.5 w-2.5 rounded-xs ${colorMeta.swatchClass}`} />}
-          <span>قروب {LABELS.colors[reg.colorGroup]}</span>
-        </p>
-        <p className="mt-1 text-xs text-[#7B7165]">{reg.isGroup ? 'مجموعة' : 'فردي'}</p>
+        {mixedAssignments ? (
+          <div className="space-y-1">
+            <p className="font-bold text-[#7C4518]">متعدد (حسب كل فرد)</p>
+            <div className="space-y-0.5 text-[11px] text-[#4E463D]">
+              {reg.members.map((m) => {
+                const mBus = getMemberBus(m, reg);
+                const mColor = getMemberColor(m, reg);
+                const mColorMeta = COLOR_GROUP_LIST.find((c) => c.key === mColor);
+                return (
+                  <p key={m.id} className="flex items-center gap-1">
+                    {mColorMeta && (
+                      <span className={`h-2 w-2 shrink-0 rounded-xs ${mColorMeta.swatchClass}`} />
+                    )}
+                    <span className="max-w-[115px] truncate font-medium text-[#1E1A16]">
+                      {m.name.split(' ')[0]}:
+                    </span>
+                    <span>
+                      {LABELS.buses[mBus]} · {LABELS.colors[mColor]}
+                    </span>
+                  </p>
+                );
+              })}
+            </div>
+            <p className="pt-0.5 text-xs text-[#7B7165]">مجموعة ({reg.members.length})</p>
+          </div>
+        ) : (
+          <>
+            <p className="font-bold text-[#1E1A16]">{LABELS.buses[reg.bus]}</p>
+            <p className="mt-1 flex items-center gap-1.5 text-xs text-[#4E463D]">
+              {colorMeta && <span className={`h-2.5 w-2.5 rounded-xs ${colorMeta.swatchClass}`} />}
+              <span>قروب {LABELS.colors[reg.colorGroup]}</span>
+            </p>
+            <p className="mt-1 text-xs text-[#7B7165]">{reg.isGroup ? 'مجموعة' : 'فردي'}</p>
+          </>
+        )}
       </td>
 
       {/* Recipient & Payment */}

@@ -11,7 +11,12 @@ import {
   type RegistrationRecord,
   type WhatsAppConfig,
 } from './types/trip';
-import { getCapacityCounts, migrateLegacyRegistrations } from './utils/validation';
+import {
+  getCapacityCounts,
+  getMemberBus,
+  getMemberColor,
+  migrateLegacyRegistrations,
+} from './utils/validation';
 import {
   getActiveGoogleScriptUrl,
   isValidGoogleScriptUrl,
@@ -91,27 +96,50 @@ export default function App() {
 
   const mutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const mutationSeqRef = useRef<number>(0);
+  const fetchSeqRef = useRef<number>(0);
   const pendingSavesRef = useRef<number>(0);
   const stressTestBusyRef = useRef<boolean>(false);
   const silentSyncInFlightRef = useRef<boolean>(false);
+  const remoteMutationLockUntilRef = useRef<number>(0);
   const lastRegistrationsJsonRef = useRef<string>('');
+  const registrationsSourceRef = useRef<'init' | 'local' | 'cloud' | 'remote'>('init');
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
 
   const isCloudConnected = isValidGoogleScriptUrl(googleScriptUrl);
 
+  const postSyncMessage = useCallback((payload: Record<string, unknown>) => {
+    try {
+      syncChannelRef.current?.postMessage(payload);
+    } catch {
+      // ignore BroadcastChannel errors
+    }
+  }, []);
+
   const applyRegistrationsIfChanged = useCallback(
-    (next: RegistrationRecord[], broadcast = false) => {
+    (next: RegistrationRecord[], source: 'local' | 'cloud' | 'remote') => {
       const serialized = JSON.stringify(next);
-      if (serialized === lastRegistrationsJsonRef.current) return;
+      if (serialized === lastRegistrationsJsonRef.current) {
+        if (source === 'local') {
+          postSyncMessage({
+            type: 'REGISTRATIONS_UPDATED',
+            registrations: next,
+            confirmed: true,
+            ts: Date.now(),
+          });
+        }
+        return;
+      }
+      registrationsSourceRef.current = source;
       lastRegistrationsJsonRef.current = serialized;
       setRegistrations(next);
-      if (broadcast) {
-        try {
-          syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
-        } catch {
-          // ignore BroadcastChannel errors
-        }
-      }
+    },
+    [postSyncMessage]
+  );
+
+  const commitLocalRegistrations = useCallback(
+    (updater: (prev: RegistrationRecord[]) => RegistrationRecord[]) => {
+      registrationsSourceRef.current = 'local';
+      setRegistrations(updater);
     },
     []
   );
@@ -125,7 +153,8 @@ export default function App() {
         if (
           silentSyncInFlightRef.current ||
           pendingSavesRef.current > 0 ||
-          stressTestBusyRef.current
+          stressTestBusyRef.current ||
+          Date.now() < remoteMutationLockUntilRef.current
         ) {
           return null;
         }
@@ -134,15 +163,24 @@ export default function App() {
         setIsSyncingSheets(true);
       }
 
+      const startMutationSeq = mutationSeqRef.current;
+      const myFetchSeq = ++fetchSeqRef.current;
+
       try {
         const res = await fetchRegistrationsFromSheets(targetUrl);
         if (!res.ok) {
           return res.error || 'تعذر قراءة البيانات من Google Sheets.';
         }
         if (Array.isArray(res.registrations)) {
-          // Do not overwrite optimistic local edits that started while this fetch was in-flight
-          if (!silent || (pendingSavesRef.current === 0 && !stressTestBusyRef.current)) {
-            applyRegistrationsIfChanged(res.registrations, false);
+          const stillLatestFetch = myFetchSeq === fetchSeqRef.current;
+          const noNewLocalMutation = startMutationSeq === mutationSeqRef.current;
+          const noInFlightWrites =
+            pendingSavesRef.current === 0 &&
+            !stressTestBusyRef.current &&
+            (!silent || Date.now() >= remoteMutationLockUntilRef.current);
+
+          if (stillLatestFetch && noNewLocalMutation && noInFlightWrites) {
+            applyRegistrationsIfChanged(res.registrations, 'cloud');
           }
         }
         return null;
@@ -161,13 +199,15 @@ export default function App() {
 
   /**
    * Queues a Google Sheets write strictly in order behind an instant optimistic UI update.
-   * Keeps the UI 0ms responsive while guaranteeing sequential consistency with Google Sheets.
+   * Keeps the UI 0ms responsive while guaranteeing sequential consistency with Google Sheets
+   * and instant cross-tab / cross-device synchronization.
    */
   const enqueueCloudMutation = useCallback(
     (task: () => Promise<SheetsApiResponse>, fallbackError: string) => {
       const mySeq = ++mutationSeqRef.current;
       pendingSavesRef.current += 1;
       setPendingSavesCount((c) => c + 1);
+      postSyncMessage({ type: 'MUTATION_IN_FLIGHT', ts: Date.now() });
 
       mutationQueueRef.current = mutationQueueRef.current
         .then(async () => {
@@ -180,7 +220,7 @@ export default function App() {
                 : rawErr;
               setCloudNotice(friendlyErr);
               if (Array.isArray(res.registrations)) {
-                applyRegistrationsIfChanged(res.registrations, true);
+                applyRegistrationsIfChanged(res.registrations, 'local');
               } else {
                 void syncFromSheets();
               }
@@ -188,7 +228,7 @@ export default function App() {
             }
 
             if (mySeq === mutationSeqRef.current && Array.isArray(res.registrations)) {
-              applyRegistrationsIfChanged(res.registrations, true);
+              applyRegistrationsIfChanged(res.registrations, 'local');
             }
           } catch (err) {
             setCloudNotice(
@@ -198,27 +238,43 @@ export default function App() {
           } finally {
             pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
             setPendingSavesCount((c) => Math.max(0, c - 1));
+            if (pendingSavesRef.current === 0) {
+              postSyncMessage({ type: 'MUTATION_IDLE', ts: Date.now() });
+            }
           }
         })
         .catch(() => {
           pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
           setPendingSavesCount((c) => Math.max(0, c - 1));
+          if (pendingSavesRef.current === 0) {
+            postSyncMessage({ type: 'MUTATION_IDLE', ts: Date.now() });
+          }
         });
     },
-    [syncFromSheets, applyRegistrationsIfChanged]
+    [syncFromSheets, applyRegistrationsIfChanged, postSyncMessage]
   );
 
-  // Initial load + Real-Time Automatic Live Polling (every 4s) + Tab Focus / Visibility Refresh
+  // Initial load + Race-Free Real-Time Recursive Live Polling (every 2.5s) + Instant Resume Sync
   useEffect(() => {
     if (!isCloudConnected) return;
 
-    void syncFromSheets(undefined, false);
+    let cancelled = false;
+    let timerId: number | null = null;
 
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void syncFromSheets(undefined, true);
-      }
-    }, 4000);
+    const scheduleNext = () => {
+      if (cancelled) return;
+      timerId = window.setTimeout(async () => {
+        if (cancelled) return;
+        if (document.visibilityState === 'visible') {
+          await syncFromSheets(undefined, true);
+        }
+        scheduleNext();
+      }, 2500);
+    };
+
+    void syncFromSheets(undefined, false).finally(() => {
+      scheduleNext();
+    });
 
     const handleResumeSync = () => {
       if (document.visibilityState === 'visible') {
@@ -231,12 +287,19 @@ export default function App() {
     document.addEventListener('visibilitychange', handleResumeSync);
 
     return () => {
-      window.clearInterval(intervalId);
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
       window.removeEventListener('focus', handleResumeSync);
       window.removeEventListener('online', handleResumeSync);
       document.removeEventListener('visibilitychange', handleResumeSync);
     };
   }, [isCloudConnected, syncFromSheets]);
+
+  // Immediate silent sync whenever switching between public & admin views
+  useEffect(() => {
+    if (!isCloudConnected) return;
+    void syncFromSheets(undefined, true);
+  }, [activeView, isCloudConnected, syncFromSheets]);
 
   // Instant Cross-Tab Live Sync (BroadcastChannel + localStorage event)
   useEffect(() => {
@@ -246,11 +309,27 @@ export default function App() {
         channel = new BroadcastChannel('trip_registrations_live_sync_v1');
         syncChannelRef.current = channel;
         channel.onmessage = (event) => {
-          if (
-            event.data?.type === 'REGISTRATIONS_UPDATED' &&
-            Array.isArray(event.data.registrations)
-          ) {
-            applyRegistrationsIfChanged(event.data.registrations, false);
+          const data = event.data;
+          if (!data) return;
+
+          if (data.type === 'MUTATION_IN_FLIGHT') {
+            // Pause this tab's silent poll briefly while the sibling tab writes to Sheets
+            remoteMutationLockUntilRef.current = Date.now() + 8000;
+            return;
+          }
+
+          if (data.type === 'MUTATION_IDLE') {
+            remoteMutationLockUntilRef.current = 0;
+            return;
+          }
+
+          if (data.type === 'REGISTRATIONS_UPDATED' && Array.isArray(data.registrations)) {
+            if (data.confirmed) {
+              remoteMutationLockUntilRef.current = 0;
+            }
+            if (pendingSavesRef.current === 0 && !stressTestBusyRef.current) {
+              applyRegistrationsIfChanged(data.registrations, 'remote');
+            }
           }
         };
       } catch {
@@ -259,10 +338,15 @@ export default function App() {
     }
 
     const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY && e.newValue) {
+      if (
+        e.key === STORAGE_KEY &&
+        e.newValue &&
+        pendingSavesRef.current === 0 &&
+        !stressTestBusyRef.current
+      ) {
         try {
           const parsed = migrateLegacyRegistrations(JSON.parse(e.newValue));
-          applyRegistrationsIfChanged(parsed, false);
+          applyRegistrationsIfChanged(parsed, 'remote');
         } catch {
           // ignore invalid JSON
         }
@@ -294,14 +378,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const source = registrationsSourceRef.current;
+    registrationsSourceRef.current = 'init';
+
     try {
       const serialized = JSON.stringify(registrations);
       lastRegistrationsJsonRef.current = serialized;
-      localStorage.setItem(STORAGE_KEY, serialized);
+      if (source !== 'remote') {
+        localStorage.setItem(STORAGE_KEY, serialized);
+        if (source === 'local' || source === 'cloud') {
+          postSyncMessage({
+            type: 'REGISTRATIONS_UPDATED',
+            registrations,
+            confirmed: pendingSavesRef.current === 0,
+            ts: Date.now(),
+          });
+        }
+      }
     } catch {
       // Ignore storage quota errors cleanly
     }
-  }, [registrations]);
+  }, [registrations, postSyncMessage]);
 
   useEffect(() => {
     try {
@@ -385,6 +482,8 @@ export default function App() {
     onRetryStatus?: RetryStatusCallback
   ): Promise<SubmitBookingResult> => {
     if (isCloudConnected) {
+      mutationSeqRef.current += 1;
+      postSyncMessage({ type: 'MUTATION_IN_FLIGHT', ts: Date.now() });
       try {
         const res = await createRegistrationInSheets(
           googleScriptUrl,
@@ -394,7 +493,7 @@ export default function App() {
         );
         if (!res.ok && !res.success) {
           if (Array.isArray(res.registrations)) {
-            applyRegistrationsIfChanged(res.registrations, true);
+            applyRegistrationsIfChanged(res.registrations, 'local');
           } else {
             void syncFromSheets(undefined, true);
           }
@@ -414,20 +513,12 @@ export default function App() {
         };
 
         if (Array.isArray(res.registrations)) {
-          applyRegistrationsIfChanged(res.registrations, true);
+          applyRegistrationsIfChanged(res.registrations, 'local');
         } else {
-          setRegistrations((prev) => {
-            const next = [
-              createdRecord,
-              ...prev.filter((r) => r.id !== createdRecord.id && (!requestId || r.requestId !== requestId)),
-            ];
-            try {
-              syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
-            } catch {
-              // ignore
-            }
-            return next;
-          });
+          commitLocalRegistrations((prev) => [
+            createdRecord,
+            ...prev.filter((r) => r.id !== createdRecord.id && (!requestId || r.requestId !== requestId)),
+          ]);
         }
         return { ok: true, created: createdRecord };
       } catch (err) {
@@ -438,6 +529,8 @@ export default function App() {
               ? err.message
               : 'حدث خطأ في الاتصال بقاعدة البيانات، يرجى التأكد من الإنترنت والمحاولة مرة أخرى.',
         };
+      } finally {
+        postSyncMessage({ type: 'MUTATION_IDLE', ts: Date.now() });
       }
     }
 
@@ -448,7 +541,7 @@ export default function App() {
       seqNo: maxSeq + 1,
       timestamp: new Date().toISOString().replace('T', ' ').slice(0, 23),
     };
-    setRegistrations((prev) => [localRecord, ...prev]);
+    commitLocalRegistrations((prev) => [localRecord, ...prev]);
     return { ok: true, created: localRecord };
   };
 
@@ -459,18 +552,20 @@ export default function App() {
     if (!targetMember || targetMember.cancelled) return null;
 
     if (!targetMember.paid) {
-      const busStat = capacities.buses[targetReg.bus];
+      const mBus = getMemberBus(targetMember, targetReg);
+      const mColor = getMemberColor(targetMember, targetReg);
+      const busStat = capacities.buses[mBus];
       if (busStat.confirmed >= BUS_CAPACITY) {
-        return `لا يمكن تأكيد الدفع: ${LABELS.buses[targetReg.bus]} — البص اتملا (${BUS_CAPACITY} فرد مؤكد).`;
+        return `لا يمكن تأكيد الدفع: ${LABELS.buses[mBus]} — البص اتملا (${BUS_CAPACITY} فرد مؤكد).`;
       }
-      const colorStat = capacities.colors[targetReg.colorGroup];
+      const colorStat = capacities.colors[mColor];
       if (colorStat.confirmed >= COLOR_GROUP_CAPACITY) {
-        return `لا يمكن تأكيد الدفع: قروب ${LABELS.colors[targetReg.colorGroup]} — القروب اكتمل (${COLOR_GROUP_CAPACITY} فرد مؤكد).`;
+        return `لا يمكن تأكيد الدفع: قروب ${LABELS.colors[mColor]} — القروب اكتمل (${COLOR_GROUP_CAPACITY} فرد مؤكد).`;
       }
     }
 
     setCloudNotice('');
-    setRegistrations((prev) =>
+    commitLocalRegistrations((prev) =>
       prev.map((reg) =>
         reg.id !== regId
           ? reg
@@ -494,7 +589,7 @@ export default function App() {
 
   const handleToggleMemberCancelled = (regId: number, memberId: string): string | null => {
     setCloudNotice('');
-    setRegistrations((prev) =>
+    commitLocalRegistrations((prev) =>
       prev.map((reg) =>
         reg.id !== regId
           ? reg
@@ -526,25 +621,45 @@ export default function App() {
     const targetReg = registrations.find((r) => r.id === regId);
     if (!targetReg) return null;
 
-    const toApproveCount = targetReg.members.filter((m) => !m.cancelled && !m.paid).length;
-    if (toApproveCount === 0) return null;
+    const toApproveMembers = targetReg.members.filter((m) => !m.cancelled && !m.paid);
+    if (toApproveMembers.length === 0) return null;
 
-    const busStat = capacities.buses[targetReg.bus];
-    if (busStat.confirmed + toApproveCount > BUS_CAPACITY) {
-      return busStat.remaining === 0
-        ? `لا يمكن تأكيد الدفع: ${LABELS.buses[targetReg.bus]} — البص اتملا.`
-        : `لا يمكن تأكيد الكل (${toApproveCount} أفراد): المتبقي في ${LABELS.buses[targetReg.bus]} هو ${busStat.remaining} مقعد فقط.`;
+    const neededBus: Record<'bus1' | 'bus2', number> = { bus1: 0, bus2: 0 };
+    const neededColor: Record<'red' | 'blue' | 'yellow' | 'green', number> = {
+      red: 0,
+      blue: 0,
+      yellow: 0,
+      green: 0,
+    };
+    for (const m of toApproveMembers) {
+      neededBus[getMemberBus(m, targetReg)] += 1;
+      neededColor[getMemberColor(m, targetReg)] += 1;
     }
 
-    const colorStat = capacities.colors[targetReg.colorGroup];
-    if (colorStat.confirmed + toApproveCount > COLOR_GROUP_CAPACITY) {
-      return colorStat.remaining === 0
-        ? `لا يمكن تأكيد الدفع: قروب ${LABELS.colors[targetReg.colorGroup]} — القروب اكتمل.`
-        : `لا يمكن تأكيد الكل (${toApproveCount} أفراد): المتبقي في قروب ${LABELS.colors[targetReg.colorGroup]} هو ${colorStat.remaining} مقعد فقط.`;
+    for (const bKey of ['bus1', 'bus2'] as const) {
+      const need = neededBus[bKey];
+      if (need === 0) continue;
+      const busStat = capacities.buses[bKey];
+      if (busStat.confirmed + need > BUS_CAPACITY) {
+        return busStat.remaining === 0
+          ? `لا يمكن تأكيد الدفع: ${LABELS.buses[bKey]} — البص اتملا.`
+          : `لا يمكن تأكيد الكل (${need} أفراد في ${LABELS.buses[bKey]}): المتبقي في ${LABELS.buses[bKey]} هو ${busStat.remaining} مقعد فقط.`;
+      }
+    }
+
+    for (const cKey of ['red', 'blue', 'yellow', 'green'] as const) {
+      const need = neededColor[cKey];
+      if (need === 0) continue;
+      const colorStat = capacities.colors[cKey];
+      if (colorStat.confirmed + need > COLOR_GROUP_CAPACITY) {
+        return colorStat.remaining === 0
+          ? `لا يمكن تأكيد الدفع: قروب ${LABELS.colors[cKey]} — القروب اكتمل.`
+          : `لا يمكن تأكيد الكل (${need} أفراد في قروب ${LABELS.colors[cKey]}): المتبقي في قروب ${LABELS.colors[cKey]} هو ${colorStat.remaining} مقعد فقط.`;
+      }
     }
 
     setCloudNotice('');
-    setRegistrations((prev) =>
+    commitLocalRegistrations((prev) =>
       prev.map((reg) =>
         reg.id !== regId
           ? reg
@@ -566,7 +681,7 @@ export default function App() {
 
   const handleCancelAllInReg = (regId: number): string | null => {
     setCloudNotice('');
-    setRegistrations((prev) =>
+    commitLocalRegistrations((prev) =>
       prev.map((reg) => {
         if (reg.id !== regId) return reg;
         const allCancelled = reg.members.every((m) => m.cancelled);
@@ -592,7 +707,7 @@ export default function App() {
 
   const handleDeleteMember = (regId: number, memberId: string): string | null => {
     setCloudNotice('');
-    setRegistrations((prev) =>
+    commitLocalRegistrations((prev) =>
       prev
         .map((reg) =>
           reg.id !== regId
@@ -616,7 +731,7 @@ export default function App() {
 
   const handleDeleteRegistration = (regId: number): string | null => {
     setCloudNotice('');
-    setRegistrations((prev) => prev.filter((reg) => reg.id !== regId));
+    commitLocalRegistrations((prev) => prev.filter((reg) => reg.id !== regId));
 
     if (isCloudConnected) {
       enqueueCloudMutation(
@@ -627,43 +742,39 @@ export default function App() {
     return null;
   };
 
-  const handleStressTestBusyChange = useCallback((busy: boolean) => {
-    stressTestBusyRef.current = busy;
-  }, []);
+  const handleStressTestBusyChange = useCallback(
+    (busy: boolean) => {
+      stressTestBusyRef.current = busy;
+      if (busy) {
+        postSyncMessage({ type: 'MUTATION_IN_FLIGHT', ts: Date.now() });
+      } else {
+        postSyncMessage({ type: 'MUTATION_IDLE', ts: Date.now() });
+      }
+    },
+    [postSyncMessage]
+  );
 
   const handleReplaceRegistrations = useCallback(
     (next: RegistrationRecord[]) => {
-      applyRegistrationsIfChanged(next, true);
+      mutationSeqRef.current += 1;
+      applyRegistrationsIfChanged(next, 'local');
     },
     [applyRegistrationsIfChanged]
   );
 
   const handleClearLocalTestRecords = useCallback(() => {
-    setRegistrations((prev) => {
-      const next = prev.filter((r) => !r.isTest);
-      try {
-        syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }, []);
+    commitLocalRegistrations((prev) => prev.filter((r) => !r.isTest));
+  }, [commitLocalRegistrations]);
 
-  const handleAppendLocalTestRecords = useCallback((records: RegistrationRecord[]) => {
-    setRegistrations((prev) => {
-      const next = [...records.slice().reverse(), ...prev];
-      try {
-        syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }, []);
+  const handleAppendLocalTestRecords = useCallback(
+    (records: RegistrationRecord[]) => {
+      commitLocalRegistrations((prev) => [...records.slice().reverse(), ...prev]);
+    },
+    [commitLocalRegistrations]
+  );
 
   const handleApproveLocalTestRecords = useCallback(() => {
-    setRegistrations((prev) => {
+    commitLocalRegistrations((prev) => {
       const caps = getCapacityCounts(prev);
       const busRem = {
         bus1: caps.buses.bus1.remaining,
@@ -676,30 +787,25 @@ export default function App() {
         green: caps.colors.green.remaining,
       };
 
-      const next = prev.map((reg) => {
+      return prev.map((reg) => {
         if (!reg.isTest) return reg;
         return {
           ...reg,
           members: reg.members.map((m) => {
             if (m.cancelled || m.paid) return m;
-            if (busRem[reg.bus] > 0 && colorRem[reg.colorGroup] > 0) {
-              busRem[reg.bus] -= 1;
-              colorRem[reg.colorGroup] -= 1;
+            const mBus = getMemberBus(m, reg);
+            const mColor = getMemberColor(m, reg);
+            if (busRem[mBus] > 0 && colorRem[mColor] > 0) {
+              busRem[mBus] -= 1;
+              colorRem[mColor] -= 1;
               return { ...m, paid: true };
             }
             return m;
           }),
         };
       });
-
-      try {
-        syncChannelRef.current?.postMessage({ type: 'REGISTRATIONS_UPDATED', registrations: next });
-      } catch {
-        // ignore
-      }
-      return next;
     });
-  }, []);
+  }, [commitLocalRegistrations]);
 
   return (
     <div className="flex min-h-screen flex-col bg-[#F9F7F3] text-[#1E1A16]">
