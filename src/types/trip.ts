@@ -32,11 +32,62 @@ export interface RegistrationRecord {
 
 export type WhatsAppConfig = Record<RecipientKey, Record<PaymentMethodKey, string>>;
 
+export interface TripSettings {
+  showAvailability: boolean;
+  registrationClosed: boolean;
+}
+
+export const DEFAULT_TRIP_SETTINGS: TripSettings = {
+  showAvailability: true,
+  registrationClosed: false,
+};
+
+export interface DailyVisitRecord {
+  date: string;
+  unique: number;
+  total: number;
+}
+
+export interface VisitorAnalyticsData {
+  trackedUnique: number;
+  trackedTotal: number;
+  baselineUnique: number;
+  baselineTotal: number;
+  grandUnique: number;
+  grandTotal: number;
+  todayDate: string;
+  todayUnique: number;
+  todayTotal: number;
+  daily: DailyVisitRecord[];
+}
+
+export function createEmptyVisitorAnalytics(todayDate?: string): VisitorAnalyticsData {
+  const now = new Date();
+  const fallbackDate =
+    todayDate ??
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  return {
+    trackedUnique: 0,
+    trackedTotal: 0,
+    baselineUnique: 0,
+    baselineTotal: 0,
+    grandUnique: 0,
+    grandTotal: 0,
+    todayDate: fallbackDate,
+    todayUnique: 0,
+    todayTotal: 0,
+    daily: [],
+  };
+}
+
 export const TICKET_PRICE = 250;
 export const BUS_CAPACITY = 50;
 export const COLOR_GROUP_CAPACITY = 25;
 
 export const STORAGE_KEY = 'trip_registrations';
+export const SETTINGS_STORAGE_KEY = 'trip_live_settings_v1';
+export const VISITOR_COUNTED_STORAGE_KEY = 'trip_visitor_counted';
+export const ANALYTICS_STORAGE_KEY = 'trip_visitor_analytics_v1';
 export const WHATSAPP_STORAGE_KEY = 'trip_whatsapp_numbers_v2';
 export const ADMIN_PIN_HASH_KEY = 'trip_admin_pin_hash_v1';
 export const ADMIN_SESSION_KEY = 'trip_admin_session_v1';

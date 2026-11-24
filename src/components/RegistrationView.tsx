@@ -48,6 +48,7 @@ import {
 } from '../utils/validation';
 import { MonasteryBannerImage } from './MonasteryBannerImage';
 import { PaymentMethodIcon } from './PaymentMethodIcon';
+import { RegistrationClosedScreen } from './RegistrationClosedScreen';
 import { generateRequestId, type RetryStatusCallback } from '../services/sheetsApi';
 
 interface CompanionDraft {
@@ -90,6 +91,7 @@ interface BusSelectorGridProps {
   capacities: CapacityCounts;
   value: BusKey | '';
   clickedFullMessage: string;
+  showAvailability: boolean;
   onSelect: (key: BusKey) => void;
   ariaLabel: string;
   compact?: boolean;
@@ -99,6 +101,7 @@ function BusSelectorGrid({
   capacities,
   value,
   clickedFullMessage,
+  showAvailability,
   onSelect,
   ariaLabel,
   compact = false,
@@ -115,6 +118,7 @@ function BusSelectorGrid({
           const isSelected = value === bus.key;
           const fillPercent = Math.min(100, Math.round((stat.confirmed / BUS_CAPACITY) * 100));
           const remainingWord = getArabicSeatWord(stat.remaining);
+          const showFullState = showAvailability && stat.isFull;
 
           return (
             <button
@@ -125,7 +129,7 @@ function BusSelectorGrid({
               aria-disabled={stat.isFull}
               onClick={() => onSelect(bus.key)}
               className={`flex flex-col ${compact ? 'gap-2 p-3' : 'gap-2.5 p-4'} rounded-lg border text-right transition-colors ${
-                stat.isFull
+                showFullState
                   ? 'border-red-200 bg-red-50/50 text-[#7A6F64] cursor-not-allowed'
                   : isSelected
                     ? 'border-[#9A5B25] bg-[#FAF4EC] cursor-pointer'
@@ -140,7 +144,7 @@ function BusSelectorGrid({
                 >
                   <span
                     className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                      stat.isFull
+                      showFullState
                         ? 'border-red-300 bg-red-100'
                         : isSelected
                           ? 'border-[#9A5B25] bg-[#9A5B25]'
@@ -152,51 +156,56 @@ function BusSelectorGrid({
                   <span>{bus.label}</span>
                 </span>
 
-                {stat.isFull ? (
-                  <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
-                    غير متاح
-                  </span>
-                ) : (
-                  <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
-                    متاح
-                  </span>
-                )}
+                {showAvailability &&
+                  (stat.isFull ? (
+                    <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
+                      غير متاح
+                    </span>
+                  ) : (
+                    <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
+                      متاح
+                    </span>
+                  ))}
               </div>
 
-              <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
-                <span
-                  dir="ltr"
-                  className={`font-mono-num font-bold ${
-                    stat.isFull ? 'text-red-700' : 'text-[#7C4518]'
-                  }`}
-                >
-                  ({stat.confirmed}/{BUS_CAPACITY})
-                </span>
-                <span
-                  className={`font-semibold ${stat.isFull ? 'text-red-700' : 'text-[#4E463D]'}`}
-                >
-                  {stat.isFull
-                    ? 'متبقي 0 مقعد · البص اتملا'
-                    : `متبقي ${stat.remaining} ${remainingWord}`}
-                </span>
-              </div>
+              {showAvailability && (
+                <>
+                  <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
+                    <span
+                      dir="ltr"
+                      className={`font-mono-num font-bold ${
+                        stat.isFull ? 'text-red-700' : 'text-[#7C4518]'
+                      }`}
+                    >
+                      ({stat.confirmed}/{BUS_CAPACITY})
+                    </span>
+                    <span
+                      className={`font-semibold ${stat.isFull ? 'text-red-700' : 'text-[#4E463D]'}`}
+                    >
+                      {stat.isFull
+                        ? 'متبقي 0 مقعد · البص اتملا'
+                        : `متبقي ${stat.remaining} ${remainingWord}`}
+                    </span>
+                  </div>
 
-              <svg
-                viewBox="0 0 100 4"
-                preserveAspectRatio="none"
-                className="h-1.5 w-full overflow-hidden rounded-full"
-                aria-hidden="true"
-              >
-                <rect x="0" y="0" width="100" height="4" rx="2" className="fill-[#ECE6DC]" />
-                <rect
-                  x={100 - fillPercent}
-                  y="0"
-                  width={fillPercent}
-                  height="4"
-                  rx="2"
-                  className={stat.isFull ? 'fill-red-600' : 'fill-[#9A5B25]'}
-                />
-              </svg>
+                  <svg
+                    viewBox="0 0 100 4"
+                    preserveAspectRatio="none"
+                    className="h-1.5 w-full overflow-hidden rounded-full"
+                    aria-hidden="true"
+                  >
+                    <rect x="0" y="0" width="100" height="4" rx="2" className="fill-[#ECE6DC]" />
+                    <rect
+                      x={100 - fillPercent}
+                      y="0"
+                      width={fillPercent}
+                      height="4"
+                      rx="2"
+                      className={stat.isFull ? 'fill-red-600' : 'fill-[#9A5B25]'}
+                    />
+                  </svg>
+                </>
+              )}
             </button>
           );
         })}
@@ -216,6 +225,7 @@ interface ColorSelectorGridProps {
   capacities: CapacityCounts;
   value: ColorGroupKey | '';
   clickedFullMessage: string;
+  showAvailability: boolean;
   onSelect: (key: ColorGroupKey) => void;
   ariaLabel: string;
   compact?: boolean;
@@ -225,6 +235,7 @@ function ColorSelectorGrid({
   capacities,
   value,
   clickedFullMessage,
+  showAvailability,
   onSelect,
   ariaLabel,
   compact = false,
@@ -244,6 +255,7 @@ function ColorSelectorGrid({
             Math.round((stat.confirmed / COLOR_GROUP_CAPACITY) * 100)
           );
           const remainingWord = getArabicSeatWord(stat.remaining);
+          const showFullState = showAvailability && stat.isFull;
 
           return (
             <button
@@ -256,7 +268,7 @@ function ColorSelectorGrid({
               className={`flex flex-col ${
                 compact ? 'gap-1.5 px-3 py-2.5' : 'gap-2.5 px-4 py-3.5'
               } rounded-lg border text-right transition-colors ${
-                stat.isFull
+                showFullState
                   ? 'border-red-200 bg-red-50/50 cursor-not-allowed'
                   : isSelected
                     ? `${group.borderClass} ${group.softBgClass} cursor-pointer`
@@ -267,7 +279,7 @@ function ColorSelectorGrid({
                 <div className="flex items-center gap-2.5">
                   <span
                     className={`h-3.5 w-3.5 shrink-0 rounded-sm ${group.swatchClass} ${
-                      stat.isFull ? 'opacity-50' : ''
+                      showFullState ? 'opacity-50' : ''
                     }`}
                     aria-hidden="true"
                   />
@@ -276,51 +288,56 @@ function ColorSelectorGrid({
                   </p>
                 </div>
 
-                {stat.isFull ? (
-                  <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
-                    غير متاح
-                  </span>
-                ) : (
-                  <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
-                    متاح
-                  </span>
-                )}
+                {showAvailability &&
+                  (stat.isFull ? (
+                    <span className="text-xs font-extrabold text-red-700 whitespace-nowrap">
+                      غير متاح
+                    </span>
+                  ) : (
+                    <span className="text-xs font-semibold text-emerald-700 whitespace-nowrap">
+                      متاح
+                    </span>
+                  ))}
               </div>
 
-              <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
-                <span
-                  dir="ltr"
-                  className={`font-mono-num font-bold ${
-                    stat.isFull ? 'text-red-700' : 'text-[#5C5349]'
-                  }`}
-                >
-                  ({stat.confirmed}/{COLOR_GROUP_CAPACITY})
-                </span>
-                <span
-                  className={`font-semibold ${stat.isFull ? 'text-red-700' : 'text-[#4E463D]'}`}
-                >
-                  {stat.isFull
-                    ? 'متبقي 0 مقعد · القروب اتملا'
-                    : `متبقي ${stat.remaining} ${remainingWord}`}
-                </span>
-              </div>
+              {showAvailability && (
+                <>
+                  <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
+                    <span
+                      dir="ltr"
+                      className={`font-mono-num font-bold ${
+                        stat.isFull ? 'text-red-700' : 'text-[#5C5349]'
+                      }`}
+                    >
+                      ({stat.confirmed}/{COLOR_GROUP_CAPACITY})
+                    </span>
+                    <span
+                      className={`font-semibold ${stat.isFull ? 'text-red-700' : 'text-[#4E463D]'}`}
+                    >
+                      {stat.isFull
+                        ? 'متبقي 0 مقعد · القروب اتملا'
+                        : `متبقي ${stat.remaining} ${remainingWord}`}
+                    </span>
+                  </div>
 
-              <svg
-                viewBox="0 0 100 4"
-                preserveAspectRatio="none"
-                className="h-1.5 w-full overflow-hidden rounded-full"
-                aria-hidden="true"
-              >
-                <rect x="0" y="0" width="100" height="4" rx="2" className="fill-[#ECE6DC]" />
-                <rect
-                  x={100 - fillPercent}
-                  y="0"
-                  width={fillPercent}
-                  height="4"
-                  rx="2"
-                  className={stat.isFull ? 'fill-red-600' : group.fillClass}
-                />
-              </svg>
+                  <svg
+                    viewBox="0 0 100 4"
+                    preserveAspectRatio="none"
+                    className="h-1.5 w-full overflow-hidden rounded-full"
+                    aria-hidden="true"
+                  >
+                    <rect x="0" y="0" width="100" height="4" rx="2" className="fill-[#ECE6DC]" />
+                    <rect
+                      x={100 - fillPercent}
+                      y="0"
+                      width={fillPercent}
+                      height="4"
+                      rx="2"
+                      className={stat.isFull ? 'fill-red-600' : group.fillClass}
+                    />
+                  </svg>
+                </>
+              )}
             </button>
           );
         })}
@@ -338,6 +355,7 @@ function ColorSelectorGrid({
 
 export interface SubmitBookingResult {
   ok: boolean;
+  registrationClosed?: boolean;
   error?: string;
   created?: RegistrationRecord;
 }
@@ -346,6 +364,10 @@ interface RegistrationViewProps {
   registrations: RegistrationRecord[];
   capacities: CapacityCounts;
   whatsappNumbers: WhatsAppConfig;
+  showAvailability: boolean;
+  registrationClosed: boolean;
+  onSubmittingChange?: (submitting: boolean) => void;
+  onRegistrationClosedDetected?: () => void;
   onAddRegistration: (
     record: RegistrationRecord,
     requestId: string,
@@ -357,6 +379,10 @@ export function RegistrationView({
   registrations,
   capacities,
   whatsappNumbers,
+  showAvailability,
+  registrationClosed,
+  onSubmittingChange,
+  onRegistrationClosedDetected,
   onAddRegistration,
 }: RegistrationViewProps) {
   const [fullName, setFullName] = useState('');
@@ -402,6 +428,10 @@ export function RegistrationView({
   const assignedWhatsAppDisplay = assignedWhatsAppRaw
     ? `+${assignedWhatsAppRaw.replace(/^\+/, '')}`
     : '';
+
+  useEffect(() => {
+    onSubmittingChange?.(isSubmitting);
+  }, [isSubmitting, onSubmittingChange]);
 
   useEffect(() => {
     if (busChoice && capacities.buses[busChoice].isFull) {
@@ -545,7 +575,9 @@ export function RegistrationView({
       const stat = capacities.buses[b.key];
       if (need > 0 && !stat.isFull && need > stat.remaining) {
         msgs.push(
-          `لا يمكن تسجيل ${need} أفراد في ${b.label} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير الباص لبعض الأفراد.`
+          showAvailability
+            ? `لا يمكن تسجيل ${need} أفراد في ${b.label} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير الباص لبعض الأفراد.`
+            : `لا يمكن تسجيل ${need} أفراد في ${b.label} لعدم توفر مقاعد كافية حالياً. يرجى تغيير الباص لبعض الأفراد.`
         );
       }
     }
@@ -554,12 +586,14 @@ export function RegistrationView({
       const stat = capacities.colors[c.key];
       if (need > 0 && !stat.isFull && need > stat.remaining) {
         msgs.push(
-          `لا يمكن تسجيل ${need} أفراد في قروب ${LABELS.colors[c.key]} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير اللون لبعض الأفراد.`
+          showAvailability
+            ? `لا يمكن تسجيل ${need} أفراد في قروب ${LABELS.colors[c.key]} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير اللون لبعض الأفراد.`
+            : `لا يمكن تسجيل ${need} أفراد في قروب ${LABELS.colors[c.key]} لعدم توفر مقاعد كافية حالياً. يرجى تغيير اللون لبعض الأفراد.`
         );
       }
     }
     return msgs;
-  }, [selectionDemand, capacities]);
+  }, [selectionDemand, capacities, showAvailability]);
 
   const scrollToForm = () => {
     const formSection = document.getElementById('registration-form');
@@ -805,6 +839,10 @@ export function RegistrationView({
         );
       });
       if (!result.ok) {
+        if (result.registrationClosed) {
+          onRegistrationClosedDetected?.();
+          return;
+        }
         setFormError(result.error || 'تعذر حفظ التسجيل، يرجى المحاولة مرة أخرى.');
         return;
       }
@@ -862,6 +900,10 @@ export function RegistrationView({
       window.clearTimeout(redirectTimer);
     };
   }, [confirmedBooking, whatsappDetails?.url]);
+
+  if (registrationClosed) {
+    return <RegistrationClosedScreen />;
+  }
 
   return (
     <div className="space-y-10 pb-16 pt-8 md:pt-12">
@@ -1308,6 +1350,7 @@ export function RegistrationView({
                       capacities={capacities}
                       value={busChoice}
                       clickedFullMessage={busClickedFull}
+                      showAvailability={showAvailability}
                       onSelect={handleSelectBus}
                       ariaLabel="اختيار الباص للمشترك الرئيسي"
                       compact
@@ -1328,6 +1371,7 @@ export function RegistrationView({
                       capacities={capacities}
                       value={colorGroup}
                       clickedFullMessage={colorClickedFull}
+                      showAvailability={showAvailability}
                       onSelect={handleSelectColor}
                       ariaLabel="تحديد المجموعة اللونية للمشترك الرئيسي"
                       compact
@@ -1546,6 +1590,7 @@ export function RegistrationView({
                                 capacities={capacities}
                                 value={comp.bus}
                                 clickedFullMessage={comp.busClickedFull}
+                                showAvailability={showAvailability}
                                 onSelect={(bKey) => handleSelectCompanionBus(comp.keyId, bKey)}
                                 ariaLabel={`اختيار الباص للمرافق ${idx + 1}`}
                                 compact
@@ -1567,6 +1612,7 @@ export function RegistrationView({
                                 capacities={capacities}
                                 value={comp.colorGroup}
                                 clickedFullMessage={comp.colorClickedFull}
+                                showAvailability={showAvailability}
                                 onSelect={(cKey) => handleSelectCompanionColor(comp.keyId, cKey)}
                                 ariaLabel={`تحديد المجموعة اللونية للمرافق ${idx + 1}`}
                                 compact
@@ -1616,6 +1662,7 @@ export function RegistrationView({
                       capacities={capacities}
                       value={busChoice}
                       clickedFullMessage={busClickedFull}
+                      showAvailability={showAvailability}
                       onSelect={handleSelectBus}
                       ariaLabel="اختيار الباص"
                     />
@@ -1637,6 +1684,7 @@ export function RegistrationView({
                       capacities={capacities}
                       value={colorGroup}
                       clickedFullMessage={colorClickedFull}
+                      showAvailability={showAvailability}
                       onSelect={handleSelectColor}
                       ariaLabel="تحديد المجموعة اللونية"
                     />

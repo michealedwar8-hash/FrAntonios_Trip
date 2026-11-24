@@ -19,7 +19,12 @@ const ADMIN_SECRET = 'THREEYOUTH_ANTHONY_2026_ADMIN';
 
 const SHEET_REGISTRATIONS = 'التسجيلات';
 const SHEET_SUMMARY = 'ملخص_الحسابات';
+const SHEET_ANALYTICS = 'إحصائيات_الزيارات';
 const PROP_LAST_SEQ = 'LAST_QUEUE_SEQ_NO';
+const PROP_SHOW_AVAILABILITY = 'TRIP_SHOW_AVAILABILITY';
+const PROP_REGISTRATION_CLOSED = 'TRIP_REGISTRATION_CLOSED';
+const PROP_BASELINE_UNIQUE = 'TRIP_BASELINE_UNIQUE';
+const PROP_BASELINE_TOTAL = 'TRIP_BASELINE_TOTAL';
 
 const TICKET_PRICE = 250;
 const BUS_CAPACITY = 50;
@@ -259,19 +264,268 @@ function syncSeqProperty_(remainingRegs) {
   props.setProperty(PROP_LAST_SEQ, String(maxSeq));
 }
 
+function getTripSettings_() {
+  var props = PropertiesService.getScriptProperties();
+  var rawShow = props.getProperty(PROP_SHOW_AVAILABILITY);
+  var rawClosed = props.getProperty(PROP_REGISTRATION_CLOSED);
+  return {
+    showAvailability: rawShow === null ? true : rawShow !== 'false',
+    registrationClosed: rawClosed === 'true',
+  };
+}
+
+function saveTripSettings_(showAvailability, registrationClosed) {
+  var props = PropertiesService.getScriptProperties();
+  var cleanShow = showAvailability !== false;
+  var cleanClosed = Boolean(registrationClosed);
+  props.setProperty(PROP_SHOW_AVAILABILITY, cleanShow ? 'true' : 'false');
+  props.setProperty(PROP_REGISTRATION_CLOSED, cleanClosed ? 'true' : 'false');
+  return {
+    showAvailability: cleanShow,
+    registrationClosed: cleanClosed,
+  };
+}
+
+function buildAvailabilityPayload_(registrations) {
+  var busConfirmed = { bus1: 0, bus2: 0 };
+  var busPending = { bus1: 0, bus2: 0 };
+  var colorConfirmed = { pink: 0, black: 0, yellow: 0, green: 0 };
+  var colorPending = { pink: 0, black: 0, yellow: 0, green: 0 };
+
+  registrations.forEach(function (reg) {
+    reg.members.forEach(function (m) {
+      if (m.cancelled) return;
+      var mBus = m.bus || reg.bus;
+      var mColor = m.colorGroup || reg.colorGroup;
+      if (m.paid) {
+        if (busConfirmed[mBus] !== undefined) busConfirmed[mBus]++;
+        if (colorConfirmed[mColor] !== undefined) colorConfirmed[mColor]++;
+      } else {
+        if (busPending[mBus] !== undefined) busPending[mBus]++;
+        if (colorPending[mColor] !== undefined) colorPending[mColor]++;
+      }
+    });
+  });
+
+  function makeBus(key) {
+    var confirmed = busConfirmed[key];
+    return {
+      confirmed: confirmed,
+      pending: busPending[key],
+      remaining: Math.max(0, BUS_CAPACITY - confirmed),
+      isFull: confirmed >= BUS_CAPACITY,
+    };
+  }
+
+  function makeColor(key) {
+    var confirmed = colorConfirmed[key];
+    return {
+      confirmed: confirmed,
+      pending: colorPending[key],
+      remaining: Math.max(0, COLOR_GROUP_CAPACITY - confirmed),
+      isFull: confirmed >= COLOR_GROUP_CAPACITY,
+    };
+  }
+
+  return {
+    buses: {
+      bus1: makeBus('bus1'),
+      bus2: makeBus('bus2'),
+    },
+    colors: {
+      pink: makeColor('pink'),
+      black: makeColor('black'),
+      yellow: makeColor('yellow'),
+      green: makeColor('green'),
+    },
+  };
+}
+
+function getCairoDateKey_() {
+  return Utilities.formatDate(new Date(), 'Africa/Cairo', 'yyyy-MM-dd');
+}
+
+function ensureAnalyticsSheet_(ss) {
+  var sheet = ss.getSheetByName(SHEET_ANALYTICS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_ANALYTICS);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.setRightToLeft(true);
+    sheet.appendRow(['التاريخ', 'الزوار الفريدين', 'إجمالي الزيارات']);
+    sheet
+      .getRange(1, 1, 1, 3)
+      .setFontWeight('bold')
+      .setBackground('#0B7285')
+      .setFontColor('#FFFFFF')
+      .setHorizontalAlignment('center');
+    sheet.setFrozenRows(1);
+    sheet.getRange('A:A').setNumberFormat('@');
+    sheet.setColumnWidth(1, 140);
+    sheet.setColumnWidth(2, 140);
+    sheet.setColumnWidth(3, 140);
+  }
+  return sheet;
+}
+
+function normalizeAnalyticsDateCell_(val) {
+  if (!val) return '';
+  if (val instanceof Date && !isNaN(val.getTime())) {
+    return Utilities.formatDate(val, 'Africa/Cairo', 'yyyy-MM-dd');
+  }
+  var s = String(val).replace(/^'/, '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return s;
+}
+
+function getVisitorAnalytics_(ss) {
+  var props = PropertiesService.getScriptProperties();
+  var baselineUnique = Math.max(0, Math.floor(Number(props.getProperty(PROP_BASELINE_UNIQUE) || '0') || 0));
+  var baselineTotal = Math.max(0, Math.floor(Number(props.getProperty(PROP_BASELINE_TOTAL) || '0') || 0));
+  var todayDate = getCairoDateKey_();
+
+  var trackedUnique = 0;
+  var trackedTotal = 0;
+  var todayUnique = 0;
+  var todayTotal = 0;
+  var daily = [];
+
+  var sheet = ss.getSheetByName(SHEET_ANALYTICS);
+  if (sheet && sheet.getLastRow() > 1) {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      var dateStr = normalizeAnalyticsDateCell_(rows[i][0]);
+      if (!dateStr) continue;
+      var u = Math.max(0, Math.floor(Number(rows[i][1]) || 0));
+      var t = Math.max(0, Math.floor(Number(rows[i][2]) || 0));
+      trackedUnique += u;
+      trackedTotal += t;
+      if (dateStr === todayDate) {
+        todayUnique += u;
+        todayTotal += t;
+      }
+      daily.push({ date: dateStr, unique: u, total: t });
+    }
+  }
+
+  // ترتيب الأيام من الأحدث للأقدم
+  daily.sort(function (a, b) {
+    return b.date.localeCompare(a.date);
+  });
+
+  return {
+    trackedUnique: trackedUnique,
+    trackedTotal: trackedTotal,
+    baselineUnique: baselineUnique,
+    baselineTotal: baselineTotal,
+    grandUnique: trackedUnique + baselineUnique,
+    grandTotal: trackedTotal + baselineTotal,
+    todayDate: todayDate,
+    todayUnique: todayUnique,
+    todayTotal: todayTotal,
+    daily: daily,
+  };
+}
+
+function handleTrackVisit_(e) {
+  var isAdminParam = String((e && e.parameter && e.parameter.isAdmin) || '0').trim();
+  if (isAdminParam === '1' || isAdminParam.toLowerCase() === 'true') {
+    return jsonOutput_({ ok: true, success: true, ignored: true });
+  }
+
+  var isUnique = String((e && e.parameter && e.parameter.unique) || '0').trim() === '1';
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return jsonOutput_({ ok: true, success: true, skipped: true });
+  }
+
+  try {
+    var ss = getSpreadsheet_();
+    var sheet = ensureAnalyticsSheet_(ss);
+    var todayDate = getCairoDateKey_();
+    var lastRow = sheet.getLastRow();
+
+    if (lastRow > 1) {
+      var rows = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+      for (var i = rows.length - 1; i >= 0; i--) {
+        if (normalizeAnalyticsDateCell_(rows[i][0]) === todayDate) {
+          var nextUnique = Math.max(0, Math.floor(Number(rows[i][1]) || 0)) + (isUnique ? 1 : 0);
+          var nextTotal = Math.max(0, Math.floor(Number(rows[i][2]) || 0)) + 1;
+          sheet.getRange(i + 2, 2, 1, 2).setValues([[nextUnique, nextTotal]]);
+          return jsonOutput_({ ok: true, success: true });
+        }
+      }
+    }
+
+    var newRow = lastRow + 1;
+    sheet.getRange(newRow, 1).setNumberFormat('@');
+    sheet.getRange(newRow, 1, 1, 3).setValues([[todayDate, isUnique ? 1 : 0, 1]]);
+    return jsonOutput_({ ok: true, success: true });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /**
- * قراءة جميع المسجلين (GET ?action=list أو ?action=adminData)
+ * قراءة البيانات:
+ * - GET ?action=trackVisit&unique=1&isAdmin=0 : تسجيل زيارة خفيفة وسريعة
+ * - GET ?action=availability : استجابة خفيفة وسريعة للمزامنة اللحظية (settings + availability فقط بدون بيانات شخصية)
+ * - GET ?action=analytics&secret=... : إحصائيات الزوار للنافذة المنبثقة في لوحة المنظمين
+ * - GET ?action=adminData&secret=... أو ?action=list : إرجاع الإعدادات + الإتاحة + الإحصائيات + المسجلين
  */
 function doGet(e) {
   try {
+    var action = String((e && e.parameter && e.parameter.action) || 'list').trim();
+
+    if (action === 'trackVisit') {
+      return handleTrackVisit_(e);
+    }
+
     const ss = getSpreadsheet_();
+
+    if (action === 'analytics') {
+      var reqSecret = String((e && e.parameter && e.parameter.secret) || '');
+      if (reqSecret !== ADMIN_SECRET) {
+        return jsonOutput_({
+          ok: false,
+          success: false,
+          error: 'غير مصرح بعرض إحصائيات الزوار.',
+        });
+      }
+      return jsonOutput_({
+        ok: true,
+        success: true,
+        analytics: getVisitorAnalytics_(ss),
+      });
+    }
+
     const sheet = ensureRegistrationsSheet_(ss);
     const registrations = parseRegistrationsFromValues_(readRawRows_(sheet));
-    return jsonOutput_({
+    const settings = getTripSettings_();
+    const availability = buildAvailabilityPayload_(registrations);
+
+    if (action === 'availability') {
+      return jsonOutput_({
+        ok: true,
+        success: true,
+        settings: settings,
+        availability: availability,
+      });
+    }
+
+    var responsePayload = {
       ok: true,
       success: true,
+      settings: settings,
+      availability: availability,
       registrations: registrations,
-    });
+    };
+
+    if (action === 'adminData') {
+      responsePayload.analytics = getVisitorAnalytics_(ss);
+    }
+
+    return jsonOutput_(responsePayload);
   } catch (err) {
     return jsonOutput_({
       ok: false,
@@ -342,6 +596,14 @@ function doPost(e) {
       return handleDeleteReg_(ss, sheet, Number(payload.regId));
     }
 
+    if (action === 'updateSettings') {
+      return handleUpdateSettings_(payload);
+    }
+
+    if (action === 'updateBaselineVisits') {
+      return handleUpdateBaselineVisits_(ss, payload);
+    }
+
     if (action === 'clearTestData') {
       return handleClearTestData_(ss, sheet, String(payload.secret || ''));
     }
@@ -388,6 +650,57 @@ function computeConfirmedCapacities_(registrations) {
   return { buses: buses, colors: colors };
 }
 
+function handleUpdateSettings_(payload) {
+  if (String(payload.secret || '') !== ADMIN_SECRET) {
+    return jsonOutput_({
+      ok: false,
+      success: false,
+      retryable: false,
+      error: 'غير مصرح بتعديل إعدادات صفحة التسجيل.',
+    });
+  }
+
+  var current = getTripSettings_();
+  var nextShow =
+    typeof payload.showAvailability === 'boolean'
+      ? payload.showAvailability
+      : current.showAvailability;
+  var nextClosed =
+    typeof payload.registrationClosed === 'boolean'
+      ? payload.registrationClosed
+      : current.registrationClosed;
+
+  var saved = saveTripSettings_(nextShow, nextClosed);
+  return jsonOutput_({
+    ok: true,
+    success: true,
+    settings: saved,
+  });
+}
+
+function handleUpdateBaselineVisits_(ss, payload) {
+  if (String(payload.secret || '') !== ADMIN_SECRET) {
+    return jsonOutput_({
+      ok: false,
+      success: false,
+      retryable: false,
+      error: 'غير مصرح بتعديل رصيد الزيارات السابقة.',
+    });
+  }
+
+  var baselineUnique = Math.max(0, Math.floor(Number(payload.baselineUnique) || 0));
+  var baselineTotal = Math.max(0, Math.floor(Number(payload.baselineTotal) || 0));
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(PROP_BASELINE_UNIQUE, String(baselineUnique));
+  props.setProperty(PROP_BASELINE_TOTAL, String(baselineTotal));
+
+  return jsonOutput_({
+    ok: true,
+    success: true,
+    analytics: getVisitorAnalytics_(ss),
+  });
+}
+
 function handleCreate_(ss, sheet, payload) {
   const reg = payload.registration || payload;
   if (!reg || !Array.isArray(reg.members) || reg.members.length === 0) {
@@ -397,6 +710,17 @@ function handleCreate_(ss, sheet, payload) {
   const isTest = Boolean(payload.isTest || reg.isTest);
   if (isTest && String(payload.secret || '') !== ADMIN_SECRET) {
     return jsonOutput_({ ok: false, success: false, error: 'مفتاح اختبار الضغط غير مصرح به.' });
+  }
+
+  // حماية فورية: رفض أي تسجيل جديد للزوار إذا كان التسجيل مغلقاً من لوحة المنظمين
+  if (!isTest && getTripSettings_().registrationClosed) {
+    return jsonOutput_({
+      ok: false,
+      success: false,
+      retryable: false,
+      registrationClosed: true,
+      error: 'التسجيل انتهى !! منتظرينكم في الرحلة',
+    });
   }
 
   const defaultBusKey = BUS_CODES[reg.bus] || '';

@@ -1,15 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ADMIN_SESSION_KEY,
+  ADMIN_STRESS_SECRET,
+  ANALYTICS_STORAGE_KEY,
   BUS_CAPACITY,
   COLOR_GROUP_CAPACITY,
+  createEmptyVisitorAnalytics,
+  DEFAULT_TRIP_SETTINGS,
   DEFAULT_WHATSAPP_NUMBERS,
   LABELS,
+  SETTINGS_STORAGE_KEY,
   STORAGE_KEY,
+  VISITOR_COUNTED_STORAGE_KEY,
   WHATSAPP_STORAGE_KEY,
   type ColorGroupKey,
   type RecipientKey,
   type RegistrationRecord,
+  type TripSettings,
+  type VisitorAnalyticsData,
   type WhatsAppConfig,
 } from './types/trip';
 import {
@@ -18,6 +26,7 @@ import {
   getMemberColor,
   migrateLegacyRegistrations,
   normalizeRegistrationRecord,
+  type CapacityCounts,
 } from './utils/validation';
 import {
   getActiveGoogleScriptUrl,
@@ -30,9 +39,14 @@ import {
   createRegistrationInSheets,
   deleteMemberInSheets,
   deleteRegistrationInSheets,
+  fetchAnalyticsFromSheets,
+  fetchAvailabilityFromSheets,
   fetchRegistrationsFromSheets,
   toggleMemberCancelledInSheets,
   toggleMemberPaidInSheets,
+  trackVisitInSheets,
+  updateBaselineVisitsInSheets,
+  updateSettingsInSheets,
   type RetryStatusCallback,
   type SheetsApiResponse,
 } from './services/sheetsApi';
@@ -82,6 +96,36 @@ function loadAdminSession(): RecipientKey | null {
   return null;
 }
 
+function loadInitialTripSettings(): TripSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return DEFAULT_TRIP_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<TripSettings>;
+    return {
+      showAvailability: parsed.showAvailability !== false,
+      registrationClosed: Boolean(parsed.registrationClosed),
+    };
+  } catch {
+    return DEFAULT_TRIP_SETTINGS;
+  }
+}
+
+function loadInitialVisitorAnalytics(): VisitorAnalyticsData {
+  try {
+    const raw = localStorage.getItem(ANALYTICS_STORAGE_KEY);
+    if (!raw) return createEmptyVisitorAnalytics();
+    const parsed = JSON.parse(raw) as Partial<VisitorAnalyticsData>;
+    const base = createEmptyVisitorAnalytics(parsed.todayDate);
+    return {
+      ...base,
+      ...parsed,
+      daily: Array.isArray(parsed.daily) ? parsed.daily : [],
+    };
+  } catch {
+    return createEmptyVisitorAnalytics();
+  }
+}
+
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>(() =>
     isAdminUrlPresent() ? 'admin' : 'public'
@@ -90,6 +134,15 @@ export default function App() {
     loadAdminSession
   );
   const [registrations, setRegistrations] = useState<RegistrationRecord[]>(loadInitialRegistrations);
+  const [tripSettings, setTripSettings] = useState<TripSettings>(loadInitialTripSettings);
+  const [visitorAnalytics, setVisitorAnalytics] = useState<VisitorAnalyticsData>(
+    loadInitialVisitorAnalytics
+  );
+  const [isRefreshingAnalytics, setIsRefreshingAnalytics] = useState(false);
+  const [liveAvailability, setLiveAvailability] = useState<CapacityCounts | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [settingsSavedPulse, setSettingsSavedPulse] = useState(false);
+  const [settingsSaveError, setSettingsSaveError] = useState('');
   const [whatsappNumbers, setWhatsAppNumbers] = useState<WhatsAppConfig>(loadInitialWhatsAppConfig);
   const [googleScriptUrl, setGoogleScriptUrl] = useState<string>(getActiveGoogleScriptUrl);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
@@ -107,6 +160,14 @@ export default function App() {
   const registrationsSourceRef = useRef<'init' | 'local' | 'cloud' | 'remote'>('init');
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
 
+  const settingsSeqRef = useRef<number>(0);
+  const isSavingSettingsRef = useRef<boolean>(false);
+  const settingsLockUntilRef = useRef<number>(0);
+  const settingsSavedTimerRef = useRef<number | null>(null);
+  const isPublicSubmittingRef = useRef<boolean>(false);
+  const isAvailabilityPollingRef = useRef<boolean>(false);
+  const visitTrackedRef = useRef<boolean>(false);
+
   const isCloudConnected = isValidGoogleScriptUrl(googleScriptUrl);
 
   const postSyncMessage = useCallback((payload: Record<string, unknown>) => {
@@ -116,6 +177,37 @@ export default function App() {
       // ignore BroadcastChannel errors
     }
   }, []);
+
+  const persistAndApplyTripSettings = useCallback(
+    (next: TripSettings, broadcast = true) => {
+      const normalized: TripSettings = {
+        showAvailability: next.showAvailability !== false,
+        registrationClosed: Boolean(next.registrationClosed),
+      };
+      setTripSettings((prev) => {
+        if (
+          prev.showAvailability === normalized.showAvailability &&
+          prev.registrationClosed === normalized.registrationClosed
+        ) {
+          return prev;
+        }
+        return normalized;
+      });
+      try {
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+      } catch {
+        // ignore storage errors
+      }
+      if (broadcast) {
+        postSyncMessage({
+          type: 'SETTINGS_UPDATED',
+          settings: normalized,
+          ts: Date.now(),
+        });
+      }
+    },
+    [postSyncMessage]
+  );
 
   const applyRegistrationsIfChanged = useCallback(
     (next: RegistrationRecord[], source: 'local' | 'cloud' | 'remote') => {
@@ -148,7 +240,11 @@ export default function App() {
   );
 
   const syncFromSheets = useCallback(
-    async (urlOverride?: string, silent = false): Promise<string | null> => {
+    async (
+      urlOverride?: string,
+      silent = false,
+      action: 'adminData' | 'list' = 'adminData'
+    ): Promise<string | null> => {
       const targetUrl = (urlOverride ?? googleScriptUrl).trim();
       if (!isValidGoogleScriptUrl(targetUrl)) return null;
 
@@ -167,12 +263,36 @@ export default function App() {
       }
 
       const startMutationSeq = mutationSeqRef.current;
+      const startSettingsSeq = settingsSeqRef.current;
       const myFetchSeq = ++fetchSeqRef.current;
 
       try {
-        const res = await fetchRegistrationsFromSheets(targetUrl);
+        const res = await fetchRegistrationsFromSheets(
+          targetUrl,
+          action,
+          action === 'adminData' ? ADMIN_STRESS_SECRET : undefined
+        );
         if (!res.ok) {
           return res.error || 'تعذر قراءة البيانات من Google Sheets.';
+        }
+        if (
+          res.settings &&
+          !isSavingSettingsRef.current &&
+          startSettingsSeq === settingsSeqRef.current &&
+          Date.now() >= settingsLockUntilRef.current
+        ) {
+          persistAndApplyTripSettings(res.settings, true);
+        }
+        if (res.availability) {
+          setLiveAvailability(res.availability);
+        }
+        if (res.analytics) {
+          setVisitorAnalytics(res.analytics);
+          try {
+            localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(res.analytics));
+          } catch {
+            // ignore storage errors
+          }
         }
         if (Array.isArray(res.registrations)) {
           const stillLatestFetch = myFetchSeq === fetchSeqRef.current;
@@ -197,8 +317,45 @@ export default function App() {
         }
       }
     },
-    [googleScriptUrl, applyRegistrationsIfChanged]
+    [googleScriptUrl, applyRegistrationsIfChanged, persistAndApplyTripSettings]
   );
+
+  const pollPublicAvailability = useCallback(async () => {
+    const targetUrl = googleScriptUrl.trim();
+    if (!isValidGoogleScriptUrl(targetUrl)) return;
+    if (document.visibilityState !== 'visible') return;
+    if (isPublicSubmittingRef.current) return;
+    if (isAvailabilityPollingRef.current) return;
+
+    isAvailabilityPollingRef.current = true;
+    const startSettingsSeq = settingsSeqRef.current;
+
+    try {
+      const res = await fetchAvailabilityFromSheets(targetUrl);
+      if (!res.ok) return;
+
+      if (
+        res.settings &&
+        !isSavingSettingsRef.current &&
+        startSettingsSeq === settingsSeqRef.current &&
+        Date.now() >= settingsLockUntilRef.current
+      ) {
+        persistAndApplyTripSettings(res.settings, false);
+      }
+
+      if (res.availability) {
+        setLiveAvailability(res.availability);
+      } else if (Array.isArray(res.registrations)) {
+        // Backward compatibility if older Apps Script returns full registrations
+        applyRegistrationsIfChanged(res.registrations, 'cloud');
+        setLiveAvailability(null);
+      }
+    } catch {
+      // Silent background poll — do not disturb visitor while typing
+    } finally {
+      isAvailabilityPollingRef.current = false;
+    }
+  }, [googleScriptUrl, persistAndApplyTripSettings, applyRegistrationsIfChanged]);
 
   /**
    * Queues a Google Sheets write strictly in order behind an instant optimistic UI update.
@@ -257,10 +414,107 @@ export default function App() {
     [syncFromSheets, applyRegistrationsIfChanged, postSyncMessage]
   );
 
-  // Initial load + Race-Free Real-Time Recursive Live Polling (every 2.5s) + Instant Resume Sync
+  // Silent One-Time Public Visitor Tracking (runs strictly once on initial page open, NEVER on ?admin=true or inside 3s polling)
+  useEffect(() => {
+    if (visitTrackedRef.current) return;
+    visitTrackedRef.current = true;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('admin') || window.location.hash === '#admin') {
+      return;
+    }
+
+    let isUnique: '1' | '0' = '0';
+    try {
+      if (!localStorage.getItem(VISITOR_COUNTED_STORAGE_KEY)) {
+        isUnique = '1';
+        localStorage.setItem(VISITOR_COUNTED_STORAGE_KEY, '1');
+      }
+    } catch {
+      isUnique = '1';
+    }
+
+    const targetUrl = getActiveGoogleScriptUrl().trim();
+    if (isValidGoogleScriptUrl(targetUrl)) {
+      trackVisitInSheets(targetUrl, isUnique);
+    } else {
+      // Local-only fallback when Google Sheets URL is not connected
+      setVisitorAnalytics((prev) => {
+        const now = new Date();
+        const todayDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        const incUnique = isUnique === '1' ? 1 : 0;
+        const existingIdx = prev.daily.findIndex((d) => d.date === todayDate);
+        const nextDaily = [...prev.daily];
+        if (existingIdx >= 0) {
+          nextDaily[existingIdx] = {
+            ...nextDaily[existingIdx],
+            unique: nextDaily[existingIdx].unique + incUnique,
+            total: nextDaily[existingIdx].total + 1,
+          };
+        } else {
+          nextDaily.unshift({ date: todayDate, unique: incUnique, total: 1 });
+        }
+        const todayRow = nextDaily.find((d) => d.date === todayDate);
+        const nextTrackedUnique = prev.trackedUnique + incUnique;
+        const nextTrackedTotal = prev.trackedTotal + 1;
+        const nextAnalytics: VisitorAnalyticsData = {
+          ...prev,
+          trackedUnique: nextTrackedUnique,
+          trackedTotal: nextTrackedTotal,
+          grandUnique: nextTrackedUnique + prev.baselineUnique,
+          grandTotal: nextTrackedTotal + prev.baselineTotal,
+          todayDate,
+          todayUnique: todayRow?.unique ?? incUnique,
+          todayTotal: todayRow?.total ?? 1,
+          daily: nextDaily,
+        };
+        try {
+          localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(nextAnalytics));
+        } catch {
+          // ignore
+        }
+        return nextAnalytics;
+      });
+    }
+  }, []);
+
+  // Real-Time Live Sync:
+  // - Public Registration Page: lightweight GET ?action=availability&_t=... every 3000ms
+  //   (paused when tab hidden or while submitting, guarded against overlap by isAvailabilityPollingRef)
+  // - Admin Panel: GET ?action=adminData&secret=... every 2.5s (reads registrations + settings)
   useEffect(() => {
     if (!isCloudConnected) return;
 
+    if (activeView === 'public') {
+      // Initial sync on open: fetch live availability/settings immediately + initial registrations for duplicate check
+      void pollPublicAvailability();
+      void syncFromSheets(undefined, true, 'list');
+
+      const intervalId = window.setInterval(() => {
+        if (document.visibilityState === 'visible' && !isPublicSubmittingRef.current) {
+          void pollPublicAvailability();
+        }
+      }, 3000);
+
+      const handleResumePublic = () => {
+        if (document.visibilityState === 'visible' && !isPublicSubmittingRef.current) {
+          void pollPublicAvailability();
+        }
+      };
+
+      window.addEventListener('focus', handleResumePublic);
+      window.addEventListener('online', handleResumePublic);
+      document.addEventListener('visibilitychange', handleResumePublic);
+
+      return () => {
+        window.clearInterval(intervalId);
+        window.removeEventListener('focus', handleResumePublic);
+        window.removeEventListener('online', handleResumePublic);
+        document.removeEventListener('visibilitychange', handleResumePublic);
+      };
+    }
+
+    // Admin View Polling
     let cancelled = false;
     let timerId: number | null = null;
 
@@ -269,40 +523,34 @@ export default function App() {
       timerId = window.setTimeout(async () => {
         if (cancelled) return;
         if (document.visibilityState === 'visible') {
-          await syncFromSheets(undefined, true);
+          await syncFromSheets(undefined, true, 'adminData');
         }
         scheduleNext();
       }, 2500);
     };
 
-    void syncFromSheets(undefined, false).finally(() => {
+    void syncFromSheets(undefined, false, 'adminData').finally(() => {
       scheduleNext();
     });
 
-    const handleResumeSync = () => {
+    const handleResumeAdmin = () => {
       if (document.visibilityState === 'visible') {
-        void syncFromSheets(undefined, true);
+        void syncFromSheets(undefined, true, 'adminData');
       }
     };
 
-    window.addEventListener('focus', handleResumeSync);
-    window.addEventListener('online', handleResumeSync);
-    document.addEventListener('visibilitychange', handleResumeSync);
+    window.addEventListener('focus', handleResumeAdmin);
+    window.addEventListener('online', handleResumeAdmin);
+    document.addEventListener('visibilitychange', handleResumeAdmin);
 
     return () => {
       cancelled = true;
       if (timerId !== null) window.clearTimeout(timerId);
-      window.removeEventListener('focus', handleResumeSync);
-      window.removeEventListener('online', handleResumeSync);
-      document.removeEventListener('visibilitychange', handleResumeSync);
+      window.removeEventListener('focus', handleResumeAdmin);
+      window.removeEventListener('online', handleResumeAdmin);
+      document.removeEventListener('visibilitychange', handleResumeAdmin);
     };
-  }, [isCloudConnected, syncFromSheets]);
-
-  // Immediate silent sync whenever switching between public & admin views
-  useEffect(() => {
-    if (!isCloudConnected) return;
-    void syncFromSheets(undefined, true);
-  }, [activeView, isCloudConnected, syncFromSheets]);
+  }, [activeView, isCloudConnected, pollPublicAvailability, syncFromSheets]);
 
   // Instant Cross-Tab Live Sync (BroadcastChannel + localStorage event)
   useEffect(() => {
@@ -326,12 +574,20 @@ export default function App() {
             return;
           }
 
+          if (data.type === 'SETTINGS_UPDATED' && data.settings) {
+            if (!isSavingSettingsRef.current) {
+              persistAndApplyTripSettings(data.settings as TripSettings, false);
+            }
+            return;
+          }
+
           if (data.type === 'REGISTRATIONS_UPDATED' && Array.isArray(data.registrations)) {
             if (data.confirmed) {
               remoteMutationLockUntilRef.current = 0;
             }
             if (pendingSavesRef.current === 0 && !stressTestBusyRef.current) {
               applyRegistrationsIfChanged(data.registrations, 'remote');
+              setLiveAvailability(null);
             }
           }
         };
@@ -341,6 +597,22 @@ export default function App() {
     }
 
     const handleStorageEvent = (e: StorageEvent) => {
+      if (e.key === SETTINGS_STORAGE_KEY && e.newValue && !isSavingSettingsRef.current) {
+        try {
+          const parsed = JSON.parse(e.newValue) as Partial<TripSettings>;
+          persistAndApplyTripSettings(
+            {
+              showAvailability: parsed.showAvailability !== false,
+              registrationClosed: Boolean(parsed.registrationClosed),
+            },
+            false
+          );
+        } catch {
+          // ignore invalid JSON
+        }
+        return;
+      }
+
       if (
         e.key === STORAGE_KEY &&
         e.newValue &&
@@ -350,6 +622,7 @@ export default function App() {
         try {
           const parsed = migrateLegacyRegistrations(JSON.parse(e.newValue));
           applyRegistrationsIfChanged(parsed, 'remote');
+          setLiveAvailability(null);
         } catch {
           // ignore invalid JSON
         }
@@ -362,7 +635,7 @@ export default function App() {
       syncChannelRef.current = null;
       channel?.close();
     };
-  }, [applyRegistrationsIfChanged]);
+  }, [applyRegistrationsIfChanged, persistAndApplyTripSettings]);
 
   useEffect(() => {
     const handleLocationChange = () => {
@@ -411,7 +684,188 @@ export default function App() {
     }
   }, [whatsappNumbers]);
 
-  const capacities = useMemo(() => getCapacityCounts(registrations), [registrations]);
+  const computedCapacities = useMemo(() => getCapacityCounts(registrations), [registrations]);
+  const capacities = activeView === 'public' && liveAvailability ? liveAvailability : computedCapacities;
+
+  const handleUpdateTripSettings = useCallback(
+    async (nextSettings: TripSettings) => {
+      const previousSettings = tripSettings;
+      const mySeq = ++settingsSeqRef.current;
+      isSavingSettingsRef.current = true;
+      settingsLockUntilRef.current = Date.now() + 5000;
+      setIsSavingSettings(true);
+      setSettingsSaveError('');
+      setSettingsSavedPulse(false);
+      if (settingsSavedTimerRef.current !== null) {
+        window.clearTimeout(settingsSavedTimerRef.current);
+      }
+
+      // Instant optimistic update + cross-tab broadcast
+      persistAndApplyTripSettings(nextSettings, true);
+
+      if (!isCloudConnected) {
+        isSavingSettingsRef.current = false;
+        setIsSavingSettings(false);
+        setSettingsSavedPulse(true);
+        settingsSavedTimerRef.current = window.setTimeout(() => setSettingsSavedPulse(false), 2200);
+        return;
+      }
+
+      try {
+        const res = await updateSettingsInSheets(
+          googleScriptUrl,
+          ADMIN_STRESS_SECRET,
+          nextSettings
+        );
+        if (!res.ok) {
+          const rawErr = res.error || 'تعذر حفظ إعدادات صفحة التسجيل في Google Sheets.';
+          const friendlyErr = rawErr.includes('عملية غير معروفة: updateSettings')
+            ? 'يرجى تحديث كود Google Apps Script ونشر إصدار جديد (New version) لتفعيل مزامنة المفاتيح اللحظية عبر الأجهزة.'
+            : rawErr;
+          setSettingsSaveError(friendlyErr);
+          if (mySeq === settingsSeqRef.current) {
+            persistAndApplyTripSettings(previousSettings, true);
+          }
+          return;
+        }
+
+        if (mySeq === settingsSeqRef.current) {
+          if (res.settings) {
+            persistAndApplyTripSettings(res.settings, true);
+          }
+          setSettingsSavedPulse(true);
+          settingsSavedTimerRef.current = window.setTimeout(
+            () => setSettingsSavedPulse(false),
+            2200
+          );
+        }
+      } catch (err) {
+        setSettingsSaveError(
+          err instanceof Error ? err.message : 'تعذر الاتصال بالسيرفر لحفظ الإعدادات.'
+        );
+        if (mySeq === settingsSeqRef.current) {
+          persistAndApplyTripSettings(previousSettings, true);
+        }
+      } finally {
+        if (mySeq === settingsSeqRef.current) {
+          isSavingSettingsRef.current = false;
+          setIsSavingSettings(false);
+        }
+      }
+    },
+    [tripSettings, isCloudConnected, googleScriptUrl, persistAndApplyTripSettings]
+  );
+
+  const handleToggleShowAvailability = useCallback(() => {
+    void handleUpdateTripSettings({
+      ...tripSettings,
+      showAvailability: !tripSettings.showAvailability,
+    });
+  }, [tripSettings, handleUpdateTripSettings]);
+
+  const handleToggleRegistrationClosed = useCallback(() => {
+    void handleUpdateTripSettings({
+      ...tripSettings,
+      registrationClosed: !tripSettings.registrationClosed,
+    });
+  }, [tripSettings, handleUpdateTripSettings]);
+
+  const handlePublicSubmittingChange = useCallback((submitting: boolean) => {
+    isPublicSubmittingRef.current = submitting;
+  }, []);
+
+  const handleRegistrationClosedDetected = useCallback(() => {
+    persistAndApplyTripSettings(
+      {
+        ...tripSettings,
+        registrationClosed: true,
+      },
+      true
+    );
+  }, [tripSettings, persistAndApplyTripSettings]);
+
+  const handleRefreshAnalytics = useCallback(async (): Promise<string | null> => {
+    const targetUrl = googleScriptUrl.trim();
+    if (!isValidGoogleScriptUrl(targetUrl)) {
+      return null;
+    }
+
+    setIsRefreshingAnalytics(true);
+    try {
+      const res = await fetchAnalyticsFromSheets(targetUrl, ADMIN_STRESS_SECRET);
+      if (!res.ok) {
+        return res.error || 'تعذر تحديث إحصائيات الزوار من السيرفر.';
+      }
+      if (res.analytics) {
+        setVisitorAnalytics(res.analytics);
+        try {
+          localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(res.analytics));
+        } catch {
+          // ignore
+        }
+        return null;
+      }
+      return 'يرجى تحديث كود Google Apps Script ونشر إصدار جديد (New version) لتفعيل إحصائيات الزوار.';
+    } catch (err) {
+      return err instanceof Error ? err.message : 'تعذر الاتصال بالسيرفر لتحديث الإحصائيات.';
+    } finally {
+      setIsRefreshingAnalytics(false);
+    }
+  }, [googleScriptUrl]);
+
+  const handleUpdateBaselineVisits = useCallback(
+    async (baselineUnique: number, baselineTotal: number): Promise<string | null> => {
+      const cleanUnique = Math.max(0, Math.floor(baselineUnique));
+      const cleanTotal = Math.max(0, Math.floor(baselineTotal));
+
+      if (!isCloudConnected) {
+        setVisitorAnalytics((prev) => {
+          const updated: VisitorAnalyticsData = {
+            ...prev,
+            baselineUnique: cleanUnique,
+            baselineTotal: cleanTotal,
+            grandUnique: prev.trackedUnique + cleanUnique,
+            grandTotal: prev.trackedTotal + cleanTotal,
+          };
+          try {
+            localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(updated));
+          } catch {
+            // ignore
+          }
+          return updated;
+        });
+        return null;
+      }
+
+      try {
+        const res = await updateBaselineVisitsInSheets(
+          googleScriptUrl,
+          ADMIN_STRESS_SECRET,
+          cleanUnique,
+          cleanTotal
+        );
+        if (!res.ok) {
+          const rawErr = res.error || 'تعذر حفظ رصيد الزيارات السابقة.';
+          if (rawErr.includes('عملية غير معروفة: updateBaselineVisits')) {
+            return 'يرجى تحديث كود Google Apps Script ونشر إصدار جديد (New version) لتفعيل حفظ رصيد الزيارات السابقة.';
+          }
+          return rawErr;
+        }
+        if (res.analytics) {
+          setVisitorAnalytics(res.analytics);
+          try {
+            localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(res.analytics));
+          } catch {
+            // ignore
+          }
+        }
+        return null;
+      } catch (err) {
+        return err instanceof Error ? err.message : 'تعذر الاتصال بالسيرفر لحفظ الرصيد السابق.';
+      }
+    },
+    [isCloudConnected, googleScriptUrl]
+  );
 
   const clearAdminUrlParams = () => {
     try {
@@ -484,6 +938,14 @@ export default function App() {
     requestId: string,
     onRetryStatus?: RetryStatusCallback
   ): Promise<SubmitBookingResult> => {
+    if (tripSettings.registrationClosed) {
+      return {
+        ok: false,
+        registrationClosed: true,
+        error: 'التسجيل انتهى !! منتظرينكم في الرحلة',
+      };
+    }
+
     if (isCloudConnected) {
       mutationSeqRef.current += 1;
       postSyncMessage({ type: 'MUTATION_IN_FLIGHT', ts: Date.now() });
@@ -495,10 +957,25 @@ export default function App() {
           onRetryStatus
         );
         if (!res.ok && !res.success) {
+          if (res.registrationClosed) {
+            persistAndApplyTripSettings(
+              {
+                ...tripSettings,
+                registrationClosed: true,
+              },
+              true
+            );
+            return {
+              ok: false,
+              registrationClosed: true,
+              error: res.error || 'التسجيل انتهى !! منتظرينكم في الرحلة',
+            };
+          }
           if (Array.isArray(res.registrations)) {
             applyRegistrationsIfChanged(res.registrations, 'local');
+            setLiveAvailability(null);
           } else {
-            void syncFromSheets(undefined, true);
+            void pollPublicAvailability();
           }
           return {
             ok: false,
@@ -517,6 +994,7 @@ export default function App() {
 
         if (Array.isArray(res.registrations)) {
           applyRegistrationsIfChanged(res.registrations, 'local');
+          setLiveAvailability(null);
         } else {
           commitLocalRegistrations((prev) => [
             createdRecord,
@@ -810,6 +1288,8 @@ export default function App() {
     });
   }, [commitLocalRegistrations]);
 
+  const hidePublicRegistrationCtas = activeView === 'public' && tripSettings.registrationClosed;
+
   return (
     <div className="flex min-h-screen flex-col bg-[#F9F7F3] text-[#1E1A16]">
       {/* Clean Public Top Bar (No Admin Link) */}
@@ -823,13 +1303,15 @@ export default function App() {
             اجتماع شباب الثلاثة فتية
           </button>
 
-          <button
-            type="button"
-            onClick={() => goToPublic(true)}
-            className="inline-flex min-h-[40px] items-center justify-center rounded-lg bg-[#9A5B25] px-5 py-2 text-xs font-bold text-white transition-colors hover:bg-[#7C4518] whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            سجّل الآن
-          </button>
+          {!hidePublicRegistrationCtas && (
+            <button
+              type="button"
+              onClick={() => goToPublic(true)}
+              className="inline-flex min-h-[40px] items-center justify-center rounded-lg bg-[#9A5B25] px-5 py-2 text-xs font-bold text-white transition-colors hover:bg-[#7C4518] whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              سجّل الآن
+            </button>
+          )}
         </div>
       </header>
 
@@ -840,6 +1322,10 @@ export default function App() {
             registrations={registrations}
             capacities={capacities}
             whatsappNumbers={whatsappNumbers}
+            showAvailability={tripSettings.showAvailability}
+            registrationClosed={tripSettings.registrationClosed}
+            onSubmittingChange={handlePublicSubmittingChange}
+            onRegistrationClosedDetected={handleRegistrationClosedDetected}
             onAddRegistration={handleAddRegistration}
           />
         ) : authenticatedOrganizer ? (
@@ -847,13 +1333,23 @@ export default function App() {
             currentOrganizer={authenticatedOrganizer}
             registrations={registrations}
             capacities={capacities}
+            tripSettings={tripSettings}
+            isSavingSettings={isSavingSettings}
+            settingsSavedPulse={settingsSavedPulse}
+            settingsSaveError={settingsSaveError}
+            onToggleShowAvailability={handleToggleShowAvailability}
+            onToggleRegistrationClosed={handleToggleRegistrationClosed}
+            visitorAnalytics={visitorAnalytics}
+            isRefreshingAnalytics={isRefreshingAnalytics}
+            onRefreshAnalytics={handleRefreshAnalytics}
+            onUpdateBaselineVisits={handleUpdateBaselineVisits}
             whatsappNumbers={whatsappNumbers}
             googleScriptUrl={googleScriptUrl}
             isSyncingSheets={isSyncingSheets}
             pendingSavesCount={pendingSavesCount}
             cloudNotice={cloudNotice}
             onDismissCloudNotice={() => setCloudNotice('')}
-            onSyncSheets={() => syncFromSheets()}
+            onSyncSheets={() => syncFromSheets(undefined, false, 'adminData')}
             onStressTestBusyChange={handleStressTestBusyChange}
             onReplaceRegistrations={handleReplaceRegistrations}
             onClearLocalTestRecords={handleClearLocalTestRecords}
@@ -884,13 +1380,15 @@ export default function App() {
           <p className="font-display font-bold text-[#1E1A16]">
             اجتماع شباب الثلاثة فتية — رحلة دير القديس العظيم الأنبا أنطونيوس بالبحر الأحمر
           </p>
-          <button
-            type="button"
-            onClick={() => goToPublic(true)}
-            className="font-semibold text-[#7C4518] hover:underline cursor-pointer"
-          >
-            الانتقال لاستمارة التسجيل
-          </button>
+          {!hidePublicRegistrationCtas && (
+            <button
+              type="button"
+              onClick={() => goToPublic(true)}
+              className="font-semibold text-[#7C4518] hover:underline cursor-pointer"
+            >
+              الانتقال لاستمارة التسجيل
+            </button>
+          )}
         </div>
       </footer>
     </div>

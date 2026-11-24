@@ -31,6 +31,8 @@ import {
   type PaymentMethodKey,
   type RecipientKey,
   type RegistrationRecord,
+  type TripSettings,
+  type VisitorAnalyticsData,
   type WhatsAppConfig,
 } from '../types/trip';
 import {
@@ -53,6 +55,8 @@ import {
   RegistrationTableRow,
 } from './AdminMemoComponents';
 import { AdminStressTestPanel } from './AdminStressTestPanel';
+import { AdminLiveControlCard } from './AdminLiveControlCard';
+import { VisitorAnalyticsModal } from './VisitorAnalyticsModal';
 
 const LAZY_PAGE_SIZE = 20;
 
@@ -60,6 +64,16 @@ interface AdminPanelViewProps {
   currentOrganizer: RecipientKey;
   registrations: RegistrationRecord[];
   capacities: CapacityCounts;
+  tripSettings: TripSettings;
+  isSavingSettings: boolean;
+  settingsSavedPulse: boolean;
+  settingsSaveError: string;
+  onToggleShowAvailability: () => void;
+  onToggleRegistrationClosed: () => void;
+  visitorAnalytics: VisitorAnalyticsData;
+  isRefreshingAnalytics: boolean;
+  onRefreshAnalytics: () => Promise<string | null>;
+  onUpdateBaselineVisits: (baselineUnique: number, baselineTotal: number) => Promise<string | null>;
   whatsappNumbers: WhatsAppConfig;
   googleScriptUrl: string;
   isSyncingSheets: boolean;
@@ -88,6 +102,16 @@ export function AdminPanelView({
   currentOrganizer,
   registrations,
   capacities,
+  tripSettings,
+  isSavingSettings,
+  settingsSavedPulse,
+  settingsSaveError,
+  onToggleShowAvailability,
+  onToggleRegistrationClosed,
+  visitorAnalytics,
+  isRefreshingAnalytics,
+  onRefreshAnalytics,
+  onUpdateBaselineVisits,
   whatsappNumbers,
   googleScriptUrl,
   isSyncingSheets,
@@ -125,6 +149,7 @@ export function AdminPanelView({
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
   const [waDraft, setWaDraft] = useState<WhatsAppConfig>(whatsappNumbers);
   const [waSaved, setWaSaved] = useState(false);
 
@@ -378,9 +403,21 @@ export function AdminPanelView({
             اجتماع شباب الثلاثة فتية · مسجل الدخول: {LABELS.recipients[currentOrganizer]} ·{' '}
             {isCloudConnected ? 'متصل بـ Google Sheets' : 'وضع التخزين المحلي'}
           </p>
-          <h1 className="mt-1 font-display text-2xl font-extrabold text-[#1E1A16] sm:text-3xl">
-            لوحة تحكم المنظمين وحسابات الرحلة
-          </h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2.5">
+            <h1 className="font-display text-2xl font-extrabold text-[#1E1A16] sm:text-3xl">
+              لوحة تحكم المنظمين وحسابات الرحلة
+            </h1>
+            <button
+              type="button"
+              onClick={() => setShowAnalyticsModal(true)}
+              className="inline-flex min-h-[34px] items-center gap-2 rounded-lg border border-[#0B7285]/30 bg-[#0B7285]/8 px-3 py-1.5 text-xs font-extrabold text-[#0B5D6B] transition-colors hover:border-[#0B7285]/60 hover:bg-[#0B7285]/15 whitespace-nowrap cursor-pointer"
+            >
+              <span>📊 إحصائيات الزوار</span>
+              <span className="rounded-md bg-[#0B7285] px-1.5 py-0.5 font-mono-num text-[11px] font-bold text-white tabular-nums">
+                {visitorAnalytics.grandUnique}
+              </span>
+            </button>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -463,6 +500,17 @@ export function AdminPanelView({
           </button>
         </div>
       </div>
+
+      {/* Real-Time Live Control Card for Registration Page */}
+      <AdminLiveControlCard
+        settings={tripSettings}
+        isSaving={isSavingSettings}
+        savedPulse={settingsSavedPulse}
+        saveError={settingsSaveError}
+        isCloudConnected={isCloudConnected}
+        onToggleShowAvailability={onToggleShowAvailability}
+        onToggleRegistrationClosed={onToggleRegistrationClosed}
+      />
 
       {/* Dedicated Stress Test & Sheet Cleanup Section (Admin Only) */}
       <AdminStressTestPanel
@@ -915,6 +963,18 @@ export function AdminPanelView({
           </>
         )}
       </div>
+
+      {/* Visitor Analytics Popup Modal */}
+      <VisitorAnalyticsModal
+        isOpen={showAnalyticsModal}
+        analytics={visitorAnalytics}
+        activePersons={overallStats.activePersons}
+        isRefreshing={isRefreshingAnalytics}
+        isCloudConnected={isCloudConnected}
+        onClose={() => setShowAnalyticsModal(false)}
+        onRefresh={onRefreshAnalytics}
+        onSaveBaseline={onUpdateBaselineVisits}
+      />
     </div>
   );
 }

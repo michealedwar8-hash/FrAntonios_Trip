@@ -1,5 +1,105 @@
-import type { ColorGroupKey, RegistrationRecord } from '../types/trip';
-import { normalizeRegistrationRecord } from '../utils/validation';
+import type {
+  ColorGroupKey,
+  DailyVisitRecord,
+  RegistrationRecord,
+  TripSettings,
+  VisitorAnalyticsData,
+} from '../types/trip';
+import {
+  normalizeRegistrationRecord,
+  type CapacityCounts,
+} from '../utils/validation';
+
+function normalizeSettings(raw?: Partial<TripSettings> | null): TripSettings | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  return {
+    showAvailability: raw.showAvailability !== false,
+    registrationClosed: Boolean(raw.registrationClosed),
+  };
+}
+
+function normalizeAvailability(raw?: unknown): CapacityCounts | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const buses = obj.buses as Record<string, { confirmed?: number; pending?: number; remaining?: number; isFull?: boolean }> | undefined;
+  const colors = obj.colors as Record<string, { confirmed?: number; pending?: number; remaining?: number; isFull?: boolean }> | undefined;
+  if (!buses || !colors) return undefined;
+
+  const normStat = (
+    stat: { confirmed?: number; pending?: number; remaining?: number; isFull?: boolean } | undefined,
+    cap: number
+  ) => {
+    const confirmed = Number(stat?.confirmed ?? 0);
+    const pending = Number(stat?.pending ?? 0);
+    const remaining =
+      typeof stat?.remaining === 'number' ? Math.max(0, stat.remaining) : Math.max(0, cap - confirmed);
+    const isFull = typeof stat?.isFull === 'boolean' ? stat.isFull : confirmed >= cap;
+    return { confirmed, pending, remaining, isFull };
+  };
+
+  return {
+    buses: {
+      bus1: normStat(buses.bus1, 50),
+      bus2: normStat(buses.bus2, 50),
+    },
+    colors: {
+      pink: normStat(colors.pink ?? colors.red, 25),
+      black: normStat(colors.black ?? colors.blue, 25),
+      yellow: normStat(colors.yellow, 25),
+      green: normStat(colors.green, 25),
+    },
+  };
+}
+
+function normalizeAnalytics(raw?: unknown): VisitorAnalyticsData | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const toNonNegInt = (val: unknown) => Math.max(0, Math.floor(Number(val) || 0));
+
+  const trackedUnique = toNonNegInt(obj.trackedUnique);
+  const trackedTotal = toNonNegInt(obj.trackedTotal);
+  const baselineUnique = toNonNegInt(obj.baselineUnique);
+  const baselineTotal = toNonNegInt(obj.baselineTotal);
+  const grandUnique =
+    typeof obj.grandUnique === 'number'
+      ? toNonNegInt(obj.grandUnique)
+      : trackedUnique + baselineUnique;
+  const grandTotal =
+    typeof obj.grandTotal === 'number'
+      ? toNonNegInt(obj.grandTotal)
+      : trackedTotal + baselineTotal;
+
+  const now = new Date();
+  const fallbackToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const todayDate =
+    typeof obj.todayDate === 'string' && obj.todayDate.trim() ? obj.todayDate.trim() : fallbackToday;
+  const todayUnique = toNonNegInt(obj.todayUnique);
+  const todayTotal = toNonNegInt(obj.todayTotal);
+
+  const daily: DailyVisitRecord[] = Array.isArray(obj.daily)
+    ? obj.daily
+        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        .map((item) => ({
+          date: String(item.date ?? '').trim(),
+          unique: toNonNegInt(item.unique),
+          total: toNonNegInt(item.total),
+        }))
+        .filter((item) => item.date !== '')
+    : [];
+
+  return {
+    trackedUnique,
+    trackedTotal,
+    baselineUnique,
+    baselineTotal,
+    grandUnique,
+    grandTotal,
+    todayDate,
+    todayUnique,
+    todayTotal,
+    daily,
+  };
+}
 
 function normalizeApiResponse<T extends SheetsApiResponse>(data: T): T {
   const normalized: T = { ...data };
@@ -14,6 +114,21 @@ function normalizeApiResponse<T extends SheetsApiResponse>(data: T): T {
       ...data.data,
       created: normalizeRegistrationRecord(data.data.created),
     };
+  }
+  const normalizedSettings = normalizeSettings(data.settings);
+  if (normalizedSettings) {
+    normalized.settings = normalizedSettings;
+  }
+  const normalizedAvailability = normalizeAvailability(data.availability);
+  if (normalizedAvailability) {
+    normalized.availability = normalizedAvailability;
+  }
+  const normalizedAnalytics = normalizeAnalytics(data.analytics);
+  if (normalizedAnalytics) {
+    normalized.analytics = normalizedAnalytics;
+  }
+  if (typeof data.registrationClosed === 'boolean') {
+    normalized.registrationClosed = data.registrationClosed;
   }
   return normalized;
 }
@@ -30,6 +145,7 @@ export interface SheetsApiResponse {
   success?: boolean;
   retryable?: boolean;
   duplicate?: boolean;
+  registrationClosed?: boolean;
   error?: string;
   seqNo?: number;
   timestamp?: string;
@@ -37,6 +153,9 @@ export interface SheetsApiResponse {
   remainingCount?: number;
   approvedCount?: number;
   skippedCount?: number;
+  settings?: TripSettings;
+  availability?: CapacityCounts;
+  analytics?: VisitorAnalyticsData;
   registrations?: RegistrationRecord[];
   created?: RegistrationRecord;
   data?: {
@@ -67,16 +186,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Fetches all registrations from Google Sheets via Apps Script doGet.
- * Supports action=adminData or action=list with cache-busting query param.
+ * Fetches all registrations (and live settings) from Google Sheets via Apps Script doGet.
+ * Supports action=adminData (with secret) or action=list with cache-busting query param.
  */
 export async function fetchRegistrationsFromSheets(
   scriptUrl: string,
-  action: 'list' | 'adminData' = 'adminData'
+  action: 'list' | 'adminData' = 'adminData',
+  secret?: string
 ): Promise<SheetsApiResponse> {
   const separator = scriptUrl.includes('?') ? '&' : '?';
+  const secretQuery = secret ? `&secret=${encodeURIComponent(secret)}` : '';
   const cacheBust = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const url = `${scriptUrl}${separator}action=${action}&_t=${cacheBust}`;
+  const url = `${scriptUrl}${separator}action=${action}${secretQuery}&_t=${cacheBust}`;
 
   const response = await fetch(url, {
     method: 'GET',
@@ -86,6 +207,34 @@ export async function fetchRegistrationsFromSheets(
 
   if (!response.ok) {
     throw new Error(`فشل الاتصال بقاعدة البيانات (HTTP ${response.status})`);
+  }
+
+  const data = (await response.json()) as SheetsApiResponse;
+  return normalizeApiResponse({
+    ...data,
+    ok: Boolean(data.ok || data.success),
+    success: Boolean(data.success || data.ok),
+  });
+}
+
+/**
+ * Lightweight real-time polling endpoint for public registration page.
+ * GET ${API_URL}?action=availability&_t=${Date.now()}
+ */
+export async function fetchAvailabilityFromSheets(
+  scriptUrl: string
+): Promise<SheetsApiResponse> {
+  const separator = scriptUrl.includes('?') ? '&' : '?';
+  const url = `${scriptUrl}${separator}action=availability&_t=${Date.now()}`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    redirect: 'follow',
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`فشل تحديث حالة الإتاحة (HTTP ${response.status})`);
   }
 
   const data = (await response.json()) as SheetsApiResponse;
@@ -350,3 +499,93 @@ export async function approveAllTestInSheets(
 ): Promise<RetryableApiResult> {
   return postWithRetry(scriptUrl, { action: 'approveAllTest', secret }, undefined, 5);
 }
+
+/**
+ * Updates live registration page controls (showAvailability & registrationClosed) immediately.
+ * Sends POST with text/plain;charset=utf-8 header and JSON body.
+ */
+export async function updateSettingsInSheets(
+  scriptUrl: string,
+  secret: string,
+  settings: TripSettings
+): Promise<RetryableApiResult> {
+  return postWithRetry(
+    scriptUrl,
+    {
+      action: 'updateSettings',
+      secret,
+      showAvailability: settings.showAvailability,
+      registrationClosed: settings.registrationClosed,
+    },
+    undefined,
+    4
+  );
+}
+
+/**
+ * Silent fire-and-forget visit tracking for public visitors (never called on admin or polling).
+ * GET ${API_URL}?action=trackVisit&unique=${isUnique}&isAdmin=0&_t=${Date.now()}
+ */
+export function trackVisitInSheets(scriptUrl: string, isUnique: '1' | '0'): void {
+  const separator = scriptUrl.includes('?') ? '&' : '?';
+  const url = `${scriptUrl}${separator}action=trackVisit&unique=${isUnique}&isAdmin=0&_t=${Date.now()}`;
+  fetch(url, {
+    keepalive: true,
+    redirect: 'follow',
+    cache: 'no-store',
+  }).catch(() => {});
+}
+
+/**
+ * Fetches visitor analytics directly for the Admin Analytics Popup Modal.
+ * GET ${API_URL}?action=analytics&secret=${ADMIN_SECRET}
+ */
+export async function fetchAnalyticsFromSheets(
+  scriptUrl: string,
+  secret: string
+): Promise<SheetsApiResponse> {
+  const separator = scriptUrl.includes('?') ? '&' : '?';
+  const url = `${scriptUrl}${separator}action=analytics&secret=${encodeURIComponent(secret)}&_t=${Date.now()}`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    redirect: 'follow',
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`تعذر جلب إحصائيات الزوار (HTTP ${response.status})`);
+  }
+
+  const data = (await response.json()) as SheetsApiResponse;
+  return normalizeApiResponse({
+    ...data,
+    ok: Boolean(data.ok || data.success),
+    success: Boolean(data.success || data.ok),
+  });
+}
+
+/**
+ * Updates historical baseline visits (e.g. from Cloudflare) via POST.
+ * { action: "updateBaselineVisits", secret: ADMIN_SECRET, baselineUnique, baselineTotal }
+ */
+export async function updateBaselineVisitsInSheets(
+  scriptUrl: string,
+  secret: string,
+  baselineUnique: number,
+  baselineTotal: number
+): Promise<RetryableApiResult> {
+  return postWithRetry(
+    scriptUrl,
+    {
+      action: 'updateBaselineVisits',
+      secret,
+      baselineUnique: Math.max(0, Math.floor(baselineUnique)),
+      baselineTotal: Math.max(0, Math.floor(baselineTotal)),
+    },
+    undefined,
+    4
+  );
+}
+
+
