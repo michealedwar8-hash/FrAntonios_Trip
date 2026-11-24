@@ -153,7 +153,7 @@ export const AdminCapacityBoard = memo(function AdminCapacityBoard({
               <div className="flex items-center justify-between gap-1.5 text-xs">
                 <span className="flex items-center gap-1.5 font-bold text-[#1E1A16]">
                   <span className={`h-2.5 w-2.5 rounded-xs ${group.swatchClass}`} />
-                  <span>قروب {group.label}</span>
+                  <span>قروب {LABELS.colors[group.key]}</span>
                 </span>
                 <span
                   className={`font-mono-num font-bold ${
@@ -214,7 +214,9 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
   const summary = getRegSummary(reg);
   const allCancelled = summary.activeCount === 0;
   const mixedAssignments = hasMixedMemberAssignments(reg);
-  const colorMeta = COLOR_GROUP_LIST.find((c) => c.key === reg.colorGroup);
+  const primaryBus = reg.members[0] ? getMemberBus(reg.members[0], reg) : reg.bus;
+  const primaryColor = reg.members[0] ? getMemberColor(reg.members[0], reg) : reg.colorGroup;
+  const colorMeta = COLOR_GROUP_LIST.find((c) => c.key === primaryColor);
 
   const rowHasDuplicate = reg.members.some((m) => {
     const nameKey = normalizeArabicText(m.name);
@@ -365,7 +367,13 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
                       return (
                         <>
                           <span aria-hidden="true">·</span>
-                          <span className="inline-flex items-center gap-1 rounded border border-[#E4DDD2] bg-[#FAF8F4] px-1.5 py-0.5 text-[11px] font-semibold text-[#1E1A16]">
+                          <span
+                            className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-semibold ${
+                              mColorMeta
+                                ? mColorMeta.badgeClass
+                                : 'border-[#E4DDD2] bg-[#FAF8F4] text-[#1E1A16]'
+                            }`}
+                          >
                             <span>{LABELS.buses[mBus]}</span>
                             <span aria-hidden="true">·</span>
                             {mColorMeta && (
@@ -488,10 +496,18 @@ export const RegistrationTableRow = memo(function RegistrationTableRow({
           </div>
         ) : (
           <>
-            <p className="font-bold text-[#1E1A16]">{LABELS.buses[reg.bus]}</p>
-            <p className="mt-1 flex items-center gap-1.5 text-xs text-[#4E463D]">
-              {colorMeta && <span className={`h-2.5 w-2.5 rounded-xs ${colorMeta.swatchClass}`} />}
-              <span>قروب {LABELS.colors[reg.colorGroup]}</span>
+            <p className="font-bold text-[#1E1A16]">{LABELS.buses[primaryBus]}</p>
+            <p className="mt-1">
+              <span
+                className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-bold ${
+                  colorMeta
+                    ? colorMeta.badgeClass
+                    : 'border-[#E4DDD2] bg-[#FAF8F4] text-[#4E463D]'
+                }`}
+              >
+                {colorMeta && <span className={`h-2.5 w-2.5 rounded-xs ${colorMeta.swatchClass}`} />}
+                <span>قروب {LABELS.colors[primaryColor]}</span>
+              </span>
             </p>
             <p className="mt-1 text-xs text-[#7B7165]">{reg.isGroup ? 'مجموعة' : 'فردي'}</p>
           </>

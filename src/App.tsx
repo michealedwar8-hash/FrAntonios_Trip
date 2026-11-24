@@ -7,6 +7,7 @@ import {
   LABELS,
   STORAGE_KEY,
   WHATSAPP_STORAGE_KEY,
+  type ColorGroupKey,
   type RecipientKey,
   type RegistrationRecord,
   type WhatsAppConfig,
@@ -16,6 +17,7 @@ import {
   getMemberBus,
   getMemberColor,
   migrateLegacyRegistrations,
+  normalizeRegistrationRecord,
 } from './utils/validation';
 import {
   getActiveGoogleScriptUrl,
@@ -117,12 +119,13 @@ export default function App() {
 
   const applyRegistrationsIfChanged = useCallback(
     (next: RegistrationRecord[], source: 'local' | 'cloud' | 'remote') => {
-      const serialized = JSON.stringify(next);
+      const normalizedNext = next.map(normalizeRegistrationRecord);
+      const serialized = JSON.stringify(normalizedNext);
       if (serialized === lastRegistrationsJsonRef.current) {
         if (source === 'local') {
           postSyncMessage({
             type: 'REGISTRATIONS_UPDATED',
-            registrations: next,
+            registrations: normalizedNext,
             confirmed: true,
             ts: Date.now(),
           });
@@ -131,7 +134,7 @@ export default function App() {
       }
       registrationsSourceRef.current = source;
       lastRegistrationsJsonRef.current = serialized;
-      setRegistrations(next);
+      setRegistrations(normalizedNext);
     },
     [postSyncMessage]
   );
@@ -625,9 +628,9 @@ export default function App() {
     if (toApproveMembers.length === 0) return null;
 
     const neededBus: Record<'bus1' | 'bus2', number> = { bus1: 0, bus2: 0 };
-    const neededColor: Record<'red' | 'blue' | 'yellow' | 'green', number> = {
-      red: 0,
-      blue: 0,
+    const neededColor: Record<ColorGroupKey, number> = {
+      pink: 0,
+      black: 0,
       yellow: 0,
       green: 0,
     };
@@ -647,7 +650,7 @@ export default function App() {
       }
     }
 
-    for (const cKey of ['red', 'blue', 'yellow', 'green'] as const) {
+    for (const cKey of ['pink', 'black', 'yellow', 'green'] as const) {
       const need = neededColor[cKey];
       if (need === 0) continue;
       const colorStat = capacities.colors[cKey];
@@ -780,9 +783,9 @@ export default function App() {
         bus1: caps.buses.bus1.remaining,
         bus2: caps.buses.bus2.remaining,
       };
-      const colorRem = {
-        red: caps.colors.red.remaining,
-        blue: caps.colors.blue.remaining,
+      const colorRem: Record<ColorGroupKey, number> = {
+        pink: caps.colors.pink.remaining,
+        black: caps.colors.black.remaining,
         yellow: caps.colors.yellow.remaining,
         green: caps.colors.green.remaining,
       };

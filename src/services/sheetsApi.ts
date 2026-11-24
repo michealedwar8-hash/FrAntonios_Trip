@@ -1,4 +1,29 @@
-import type { RegistrationRecord } from '../types/trip';
+import type { ColorGroupKey, RegistrationRecord } from '../types/trip';
+import { normalizeRegistrationRecord } from '../utils/validation';
+
+function normalizeApiResponse<T extends SheetsApiResponse>(data: T): T {
+  const normalized: T = { ...data };
+  if (Array.isArray(data.registrations)) {
+    normalized.registrations = data.registrations.map(normalizeRegistrationRecord);
+  }
+  if (data.created) {
+    normalized.created = normalizeRegistrationRecord(data.created);
+  }
+  if (data.data?.created) {
+    normalized.data = {
+      ...data.data,
+      created: normalizeRegistrationRecord(data.data.created),
+    };
+  }
+  return normalized;
+}
+
+function toLegacyWireColor(color?: ColorGroupKey): string | undefined {
+  if (!color) return color;
+  if (color === 'pink') return 'red';
+  if (color === 'black') return 'blue';
+  return color;
+}
 
 export interface SheetsApiResponse {
   ok: boolean;
@@ -64,11 +89,11 @@ export async function fetchRegistrationsFromSheets(
   }
 
   const data = (await response.json()) as SheetsApiResponse;
-  return {
+  return normalizeApiResponse({
     ...data,
     ok: Boolean(data.ok || data.success),
     success: Boolean(data.success || data.ok),
-  };
+  });
 }
 
 /**
@@ -148,12 +173,12 @@ export async function postWithRetry(
 
       const isSuccess = Boolean(rawData.success || rawData.ok);
       if (isSuccess) {
-        return {
+        return normalizeApiResponse({
           ...rawData,
           ok: true,
           success: true,
           retriesUsed: attempt,
-        };
+        });
       }
 
       // Server explicitly signaled retryable lock/contention error
@@ -179,13 +204,13 @@ export async function postWithRetry(
       }
 
       // Logical non-retryable validation error (e.g. "البص اتملا" / "القروب اكتمل") -> stop immediately
-      return {
+      return normalizeApiResponse({
         ...rawData,
         ok: false,
         success: false,
         retryable: false,
         retriesUsed: attempt,
-      };
+      });
     } catch {
       // Network error / transient disconnect -> retry automatically with backoff + jitter
       if (attempt < maxRetries) {
@@ -215,7 +240,7 @@ export async function createRegistrationInSheets(
   onRetryStatus?: RetryStatusCallback,
   extra?: { isTest?: boolean; secret?: string }
 ): Promise<RetryableApiResult> {
-  return postWithRetry(
+  const result = await postWithRetry(
     scriptUrl,
     {
       action: 'register',
@@ -231,6 +256,40 @@ export async function createRegistrationInSheets(
     onRetryStatus,
     8
   );
+
+  // Seamless compatibility if the deployed Apps Script has not yet been redeployed with pink/black keys
+  if (
+    !result.ok &&
+    typeof result.error === 'string' &&
+    result.error.includes('اختيار القروب اللوني غير صحيح')
+  ) {
+    const legacyRecord = {
+      ...record,
+      colorGroup: toLegacyWireColor(record.colorGroup),
+      members: record.members.map((m) => ({
+        ...m,
+        colorGroup: toLegacyWireColor(m.colorGroup ?? record.colorGroup),
+      })),
+    };
+    return postWithRetry(
+      scriptUrl,
+      {
+        action: 'register',
+        requestId,
+        isTest: Boolean(extra?.isTest ?? record.isTest),
+        secret: extra?.secret ?? '',
+        registration: {
+          ...legacyRecord,
+          requestId,
+          isTest: Boolean(extra?.isTest ?? record.isTest),
+        },
+      },
+      onRetryStatus,
+      8
+    );
+  }
+
+  return result;
 }
 
 export async function toggleMemberPaidInSheets(

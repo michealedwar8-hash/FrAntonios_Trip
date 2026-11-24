@@ -18,12 +18,78 @@ import {
   type WhatsAppConfig,
 } from '../types/trip';
 
+const COLOR_GROUP_MIGRATION_MAP: Record<string, ColorGroupKey> = {
+  pink: 'pink',
+  black: 'black',
+  yellow: 'yellow',
+  green: 'green',
+  red: 'pink',
+  blue: 'black',
+  وردي: 'pink',
+  أسود: 'black',
+  أصفر: 'yellow',
+  أخضر: 'green',
+  أحمر: 'pink',
+  أزرق: 'black',
+};
+
+const MIGRATED_PINK_MEMBERS_RAW = [
+  'نونسيا ناصر كرزون',
+  'مارينا ماجد لمعي',
+  'ديانا موسى توفيق',
+  'لليان موسى توفيق',
+  'بطه امين بشاي',
+  'سانتي امين بشاي',
+] as const;
+
+let migratedPinkMemberSetCache: Set<string> | null = null;
+function getMigratedPinkMemberSet(): Set<string> {
+  if (!migratedPinkMemberSetCache) {
+    migratedPinkMemberSetCache = new Set(
+      MIGRATED_PINK_MEMBERS_RAW.map((name) => normalizeArabicText(name))
+    );
+  }
+  return migratedPinkMemberSetCache;
+}
+
+export function normalizeColorGroupKey(raw: unknown): ColorGroupKey {
+  const trimmed = String(raw ?? '').trim();
+  const lower = trimmed.toLowerCase();
+  return COLOR_GROUP_MIGRATION_MAP[lower] ?? COLOR_GROUP_MIGRATION_MAP[trimmed] ?? 'pink';
+}
+
+export function normalizeRegistrationRecord(reg: RegistrationRecord): RegistrationRecord {
+  const migratedPinkMembers = getMigratedPinkMemberSet();
+  const normalizedMembers = reg.members.map((member) => {
+    const rawColor = member.colorGroup ?? reg.colorGroup;
+    const rawLower = String(rawColor ?? '').trim().toLowerCase();
+    const isMigratedPinkMember = migratedPinkMembers.has(normalizeArabicText(member.name));
+    const nextColor: ColorGroupKey =
+      isMigratedPinkMember && (!rawLower || rawLower === 'red' || rawLower === 'أحمر')
+        ? 'pink'
+        : normalizeColorGroupKey(rawColor);
+
+    return {
+      ...member,
+      colorGroup: nextColor,
+    };
+  });
+
+  const primaryColor = normalizedMembers[0]?.colorGroup ?? normalizeColorGroupKey(reg.colorGroup);
+
+  return {
+    ...reg,
+    colorGroup: primaryColor,
+    members: normalizedMembers,
+  };
+}
+
 export function getMemberBus(member: MemberRecord, reg: RegistrationRecord): BusKey {
   return member.bus ?? reg.bus;
 }
 
 export function getMemberColor(member: MemberRecord, reg: RegistrationRecord): ColorGroupKey {
-  return member.colorGroup ?? reg.colorGroup;
+  return normalizeColorGroupKey(member.colorGroup ?? reg.colorGroup);
 }
 
 export function hasMixedMemberAssignments(reg: RegistrationRecord): boolean {
@@ -311,8 +377,8 @@ export interface CapacityCounts {
 export function getCapacityCounts(registrations: RegistrationRecord[]): CapacityCounts {
   const busConfirmed: Record<BusKey, number> = { bus1: 0, bus2: 0 };
   const busPending: Record<BusKey, number> = { bus1: 0, bus2: 0 };
-  const colorConfirmed: Record<ColorGroupKey, number> = { red: 0, blue: 0, yellow: 0, green: 0 };
-  const colorPending: Record<ColorGroupKey, number> = { red: 0, blue: 0, yellow: 0, green: 0 };
+  const colorConfirmed: Record<ColorGroupKey, number> = { pink: 0, black: 0, yellow: 0, green: 0 };
+  const colorPending: Record<ColorGroupKey, number> = { pink: 0, black: 0, yellow: 0, green: 0 };
 
   for (const reg of registrations) {
     for (const member of reg.members) {
@@ -355,8 +421,8 @@ export function getCapacityCounts(registrations: RegistrationRecord[]): Capacity
       bus2: buildBus('bus2'),
     },
     colors: {
-      red: buildColor('red'),
-      blue: buildColor('blue'),
+      pink: buildColor('pink'),
+      black: buildColor('black'),
       yellow: buildColor('yellow'),
       green: buildColor('green'),
     },
@@ -484,10 +550,11 @@ export function migrateLegacyRegistrations(rawList: unknown): RegistrationRecord
 
   return rawList.map((item: any) => {
     if (Array.isArray(item?.members)) {
-      return item as RegistrationRecord;
+      return normalizeRegistrationRecord(item as RegistrationRecord);
     }
 
     const isPaid = item?.status === 'تم التأكيد';
+    const normalizedColor = normalizeColorGroupKey(item?.colorGroup);
     const members = [
       {
         id: `${item?.id ?? Date.now()}_0`,
@@ -496,6 +563,7 @@ export function migrateLegacyRegistrations(rawList: unknown): RegistrationRecord
         isMain: true,
         paid: isPaid,
         cancelled: false,
+        colorGroup: normalizedColor,
       },
     ];
 
@@ -508,24 +576,23 @@ export function migrateLegacyRegistrations(rawList: unknown): RegistrationRecord
           isMain: false,
           paid: isPaid,
           cancelled: false,
+          colorGroup: normalizedColor,
         });
       });
     }
 
-    return {
+    return normalizeRegistrationRecord({
       id: item?.id ?? Date.now(),
       isGroup: Boolean(item?.isGroup || members.length > 1),
       members,
       bus: item?.bus === 'bus2' ? 'bus2' : 'bus1',
-      colorGroup: ['red', 'blue', 'yellow', 'green'].includes(item?.colorGroup)
-        ? item.colorGroup
-        : 'red',
+      colorGroup: normalizedColor,
       recipient: item?.recipient === 'fayez' ? 'fayez' : 'mekhail',
       paymentMethod: ['instapay', 'vf', 'orange'].includes(item?.paymentMethod)
         ? item.paymentMethod
         : 'instapay',
       timestamp: item?.timestamp || new Date().toLocaleString('ar-EG'),
-    };
+    });
   });
 }
 
@@ -846,7 +913,7 @@ export function exportRegistrationsToExcel(
     [],
     ['حالة القروبات اللونية (سعة 25 فرد مؤكد)', 'المؤكدين', 'المتبقي', 'بانتظار الدفع', 'الحالة'],
     ...COLOR_GROUP_LIST.map((c) => [
-      `قروب ${c.label}`,
+      `قروب ${LABELS.colors[c.key]}`,
       caps.colors[c.key].confirmed,
       caps.colors[c.key].remaining,
       caps.colors[c.key].pending,

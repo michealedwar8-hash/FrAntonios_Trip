@@ -72,7 +72,7 @@ interface AdminStressTestPanelProps {
 }
 
 const BUS_CYCLE: BusKey[] = ['bus1', 'bus2'];
-const COLOR_CYCLE: ColorGroupKey[] = ['red', 'blue', 'yellow', 'green'];
+const COLOR_CYCLE: ColorGroupKey[] = ['pink', 'black', 'yellow', 'green'];
 const PAYMENT_CYCLE: PaymentMethodKey[] = ['instapay', 'orange', 'vf'];
 
 function buildTestPhone(uniqueNumber: number): string {

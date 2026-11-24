@@ -1,5 +1,5 @@
 export type BusKey = 'bus1' | 'bus2';
-export type ColorGroupKey = 'red' | 'blue' | 'yellow' | 'green';
+export type ColorGroupKey = 'pink' | 'black' | 'yellow' | 'green';
 export type RecipientKey = 'mekhail' | 'fayez';
 export type PaymentMethodKey = 'instapay' | 'vf' | 'orange';
 export type BookingStatusKey = 'paid' | 'partial' | 'unpaid' | 'cancelled';
@@ -97,20 +97,26 @@ export const COLOR_GROUP_LIST: {
   swatchClass: string;
   borderClass: string;
   softBgClass: string;
+  fillClass: string;
+  badgeClass: string;
 }[] = [
   {
-    key: 'red',
-    label: 'أحمر',
-    swatchClass: 'bg-red-600',
-    borderClass: 'border-red-600',
-    softBgClass: 'bg-red-50/70',
+    key: 'pink',
+    label: 'وردي',
+    swatchClass: 'bg-pink-500',
+    borderClass: 'border-pink-500',
+    softBgClass: 'bg-pink-50/70',
+    fillClass: 'fill-pink-500',
+    badgeClass: 'border-pink-200 bg-pink-50 text-pink-800',
   },
   {
-    key: 'blue',
-    label: 'أزرق',
-    swatchClass: 'bg-blue-600',
-    borderClass: 'border-blue-600',
-    softBgClass: 'bg-blue-50/70',
+    key: 'black',
+    label: 'أسود',
+    swatchClass: 'bg-neutral-900',
+    borderClass: 'border-neutral-900',
+    softBgClass: 'bg-neutral-100/80',
+    fillClass: 'fill-neutral-900',
+    badgeClass: 'border-neutral-300 bg-neutral-100 text-neutral-900',
   },
   {
     key: 'yellow',
@@ -118,6 +124,8 @@ export const COLOR_GROUP_LIST: {
     swatchClass: 'bg-amber-400',
     borderClass: 'border-amber-500',
     softBgClass: 'bg-amber-50/70',
+    fillClass: 'fill-amber-500',
+    badgeClass: 'border-amber-200 bg-amber-50 text-amber-900',
   },
   {
     key: 'green',
@@ -125,6 +133,8 @@ export const COLOR_GROUP_LIST: {
     swatchClass: 'bg-emerald-600',
     borderClass: 'border-emerald-600',
     softBgClass: 'bg-emerald-50/70',
+    fillClass: 'fill-emerald-600',
+    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-800',
   },
 ];
 
@@ -150,8 +160,8 @@ export const LABELS = {
     orange: 'أورانج كاش',
   } as Record<PaymentMethodKey, string>,
   colors: {
-    red: 'أحمر',
-    blue: 'أزرق',
+    pink: 'وردي',
+    black: 'أسود',
     yellow: 'أصفر',
     green: 'أخضر',
   } as Record<ColorGroupKey, string>,

@@ -272,7 +272,7 @@ function ColorSelectorGrid({
                     aria-hidden="true"
                   />
                   <p className="font-display text-sm font-bold text-[#1E1A16]">
-                    قروب {group.label}
+                    قروب {LABELS.colors[group.key]}
                   </p>
                 </div>
 
@@ -318,17 +318,7 @@ function ColorSelectorGrid({
                   width={fillPercent}
                   height="4"
                   rx="2"
-                  className={
-                    stat.isFull
-                      ? 'fill-red-600'
-                      : group.key === 'red'
-                        ? 'fill-red-600'
-                        : group.key === 'blue'
-                          ? 'fill-blue-600'
-                          : group.key === 'yellow'
-                            ? 'fill-amber-500'
-                            : 'fill-emerald-600'
-                  }
+                  className={stat.isFull ? 'fill-red-600' : group.fillClass}
                 />
               </svg>
             </button>
@@ -533,7 +523,7 @@ export function RegistrationView({
 
   const selectionDemand = useMemo(() => {
     const buses: Record<BusKey, number> = { bus1: 0, bus2: 0 };
-    const colors: Record<ColorGroupKey, number> = { red: 0, blue: 0, yellow: 0, green: 0 };
+    const colors: Record<ColorGroupKey, number> = { pink: 0, black: 0, yellow: 0, green: 0 };
 
     if (busChoice) buses[busChoice] += 1;
     if (colorGroup) colors[colorGroup] += 1;
@@ -564,7 +554,7 @@ export function RegistrationView({
       const stat = capacities.colors[c.key];
       if (need > 0 && !stat.isFull && need > stat.remaining) {
         msgs.push(
-          `لا يمكن تسجيل ${need} أفراد في قروب ${c.label} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير اللون لبعض الأفراد.`
+          `لا يمكن تسجيل ${need} أفراد في قروب ${LABELS.colors[c.key]} — المتبقي حالياً ${stat.remaining} ${getArabicSeatWord(stat.remaining)} فقط. يرجى تغيير اللون لبعض الأفراد.`
         );
       }
     }

@@ -50,16 +50,21 @@ const HEADERS = [
 const BUS_LABELS = { bus1: 'الباص الأول', bus2: 'الباص الثاني' };
 const BUS_CODES = { 'الباص الأول': 'bus1', 'الباص الثاني': 'bus2', bus1: 'bus1', bus2: 'bus2' };
 
-const COLOR_LABELS = { red: 'أحمر', blue: 'أزرق', yellow: 'أصفر', green: 'أخضر' };
+const COLOR_LABELS = { pink: 'وردي', black: 'أسود', yellow: 'أصفر', green: 'أخضر' };
 const COLOR_CODES = {
-  'أحمر': 'red',
-  'أزرق': 'blue',
+  'وردي': 'pink',
+  'أسود': 'black',
   'أصفر': 'yellow',
   'أخضر': 'green',
-  red: 'red',
-  blue: 'blue',
+  pink: 'pink',
+  black: 'black',
   yellow: 'yellow',
   green: 'green',
+  // توافق مع السجلات القديمة
+  'أحمر': 'pink',
+  'أزرق': 'black',
+  red: 'pink',
+  blue: 'black',
 };
 
 const RECIPIENT_LABELS = { mekhail: 'ميخائيل إدور', fayez: 'فايز فيكتور' };
@@ -164,11 +169,8 @@ function calculateAgeFromBirthDate_(birthDateStr) {
 }
 
 function setupSheets() {
-  const ss = getSpreadsheet_();
-  const sheet = ensureRegistrationsSheet_(ss);
-  const allRegs = parseRegistrationsFromValues_(readRawRows_(sheet));
-  rebuildSummarySheet_(ss, allRegs);
-  return 'تمت تهيئة أوراق الشيت بنجاح';
+  migrateColorsToPinkAndBlack();
+  return 'تمت تهيئة أوراق الشيت وتحديث الألوان بنجاح';
 }
 
 function ensureRegistrationsSheet_(ss) {
@@ -370,7 +372,7 @@ function doPost(e) {
 
 function computeConfirmedCapacities_(registrations) {
   const buses = { bus1: 0, bus2: 0 };
-  const colors = { red: 0, blue: 0, yellow: 0, green: 0 };
+  const colors = { pink: 0, black: 0, yellow: 0, green: 0 };
 
   registrations.forEach(function (reg) {
     reg.members.forEach(function (m) {
@@ -398,7 +400,8 @@ function handleCreate_(ss, sheet, payload) {
   }
 
   const defaultBusKey = BUS_CODES[reg.bus] || '';
-  const defaultColorKey = COLOR_CODES[reg.colorGroup] || '';
+  const rawDefaultColor = String(reg.colorGroup || '').trim();
+  const defaultColorKey = COLOR_CODES[rawDefaultColor] || COLOR_CODES[rawDefaultColor.toLowerCase()] || '';
   const paymentKey = PAYMENT_CODES[reg.paymentMethod] || '';
 
   if (!paymentKey)
@@ -409,7 +412,9 @@ function handleCreate_(ss, sheet, payload) {
   for (var mc = 0; mc < reg.members.length; mc++) {
     var mItem = reg.members[mc];
     var mBus = BUS_CODES[mItem.bus] || defaultBusKey;
-    var mColor = COLOR_CODES[mItem.colorGroup] || defaultColorKey;
+    var rawMemberColor = String(mItem.colorGroup || '').trim();
+    var mColor =
+      COLOR_CODES[rawMemberColor] || COLOR_CODES[rawMemberColor.toLowerCase()] || defaultColorKey;
     if (!mBus) {
       return jsonOutput_({
         ok: false,
@@ -542,7 +547,7 @@ function handleCreate_(ss, sheet, payload) {
   if (!isTest) {
     const caps = computeConfirmedCapacities_(existingRegs);
     var needBuses = { bus1: 0, bus2: 0 };
-    var needColors = { red: 0, blue: 0, yellow: 0, green: 0 };
+    var needColors = { pink: 0, black: 0, yellow: 0, green: 0 };
     for (var nc = 0; nc < incomingCount; nc++) {
       needBuses[memberBusKeys[nc]] = (needBuses[memberBusKeys[nc]] || 0) + 1;
       needColors[memberColorKeys[nc]] = (needColors[memberColorKeys[nc]] || 0) + 1;
@@ -580,7 +585,7 @@ function handleCreate_(ss, sheet, payload) {
       }
     }
 
-    var colorKeysToCheck = ['red', 'blue', 'yellow', 'green'];
+    var colorKeysToCheck = ['pink', 'black', 'yellow', 'green'];
     for (var ci = 0; ci < colorKeysToCheck.length; ci++) {
       var cKey = colorKeysToCheck[ci];
       var cNeed = needColors[cKey] || 0;
@@ -843,7 +848,7 @@ function handleApproveAll_(ss, sheet, regId) {
 
   const caps = computeConfirmedCapacities_(allRegs);
   var needBuses = { bus1: 0, bus2: 0 };
-  var needColors = { red: 0, blue: 0, yellow: 0, green: 0 };
+  var needColors = { pink: 0, black: 0, yellow: 0, green: 0 };
   toApproveMembers.forEach(function (m) {
     var mBus = m.bus || targetReg.bus;
     var mColor = m.colorGroup || targetReg.colorGroup;
@@ -877,7 +882,7 @@ function handleApproveAll_(ss, sheet, regId) {
     }
   }
 
-  var cList = ['red', 'blue', 'yellow', 'green'];
+  var cList = ['pink', 'black', 'yellow', 'green'];
   for (var ci = 0; ci < cList.length; ci++) {
     var cKey = cList[ci];
     var cNeed = needColors[cKey] || 0;
@@ -1148,8 +1153,8 @@ function handleApproveAllTest_(ss, sheet, secret) {
     bus2: Math.max(0, BUS_CAPACITY - caps.buses.bus2),
   };
   const colorRem = {
-    red: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.red),
-    blue: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.blue),
+    pink: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.pink),
+    black: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.black),
     yellow: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.yellow),
     green: Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.green),
   };
@@ -1170,7 +1175,7 @@ function handleApproveAllTest_(ss, sheet, secret) {
 
     if (isTestRow && !isCancelled && !isPaid) {
       var busKey = BUS_CODES[String(row[7] || '').trim()] || 'bus1';
-      var colorKey = COLOR_CODES[String(row[8] || '').trim()] || 'red';
+      var colorKey = COLOR_CODES[String(row[8] || '').trim()] || 'pink';
       if (busRem[busKey] > 0 && colorRem[colorKey] > 0) {
         busRem[busKey]--;
         colorRem[colorKey]--;
@@ -1228,7 +1233,8 @@ function parseRegistrationsFromValues_(values) {
     var paid = String(row[5] || '').trim() === 'مدفوع';
     var cancelled = String(row[6] || '').trim() === 'نعم';
     var bus = BUS_CODES[String(row[7] || '').trim()] || 'bus1';
-    var colorGroup = COLOR_CODES[String(row[8] || '').trim()] || 'red';
+    var rawColor = String(row[8] || '').trim();
+    var colorGroup = COLOR_CODES[rawColor] || COLOR_CODES[rawColor.toLowerCase()] || 'pink';
     var isGroup = String(row[9] || '').trim() === 'مجموعة';
     var recipient = RECIPIENT_CODES[String(row[10] || '').trim()] || 'mekhail';
     var paymentMethod = PAYMENT_CODES[String(row[11] || '').trim()] || 'instapay';
@@ -1361,8 +1367,8 @@ function rebuildSummarySheet_(ss, registrations) {
     ['الباص الثاني', caps.buses.bus2, Math.max(0, BUS_CAPACITY - caps.buses.bus2), caps.buses.bus2 >= BUS_CAPACITY ? 'البص اتملا' : 'متاح', '', '', ''],
     ['', '', '', '', '', '', ''],
     ['القروب اللوني (سعة 25 فرد مؤكد)', 'المؤكدين بالدفع', 'المتبقي', 'الحالة', '', '', ''],
-    ['قروب أحمر', caps.colors.red, Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.red), caps.colors.red >= COLOR_GROUP_CAPACITY ? 'القروب اكتمل' : 'متاح', '', '', ''],
-    ['قروب أزرق', caps.colors.blue, Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.blue), caps.colors.blue >= COLOR_GROUP_CAPACITY ? 'القروب اكتمل' : 'متاح', '', '', ''],
+    ['قروب وردي', caps.colors.pink, Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.pink), caps.colors.pink >= COLOR_GROUP_CAPACITY ? 'القروب اكتمل' : 'متاح', '', '', ''],
+    ['قروب أسود', caps.colors.black, Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.black), caps.colors.black >= COLOR_GROUP_CAPACITY ? 'القروب اكتمل' : 'متاح', '', '', ''],
     ['قروب أصفر', caps.colors.yellow, Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.yellow), caps.colors.yellow >= COLOR_GROUP_CAPACITY ? 'القروب اكتمل' : 'متاح', '', '', ''],
     ['قروب أخضر', caps.colors.green, Math.max(0, COLOR_GROUP_CAPACITY - caps.colors.green), caps.colors.green >= COLOR_GROUP_CAPACITY ? 'القروب اكتمل' : 'متاح', '', '', ''],
   ];
@@ -1381,3 +1387,35 @@ function rebuildSummarySheet_(ss, registrations) {
     }
   }
 }
+
+/**
+ * دالة مساعدة لتحديث عمود «القروب اللوني» في الشيت الفعلي من (أحمر -> وردي) و(أزرق -> أسود)
+ * بما في ذلك تحديث المسجلين (نونسيا ناصر كرزون، مارينا ماجد لمعي، ديانا موسى توفيق،
+ * لليان موسى توفيق، بطه امين بشاي، سانتي امين بشاي) إلى «وردي».
+ */
+function migrateColorsToPinkAndBlack() {
+  const ss = getSpreadsheet_();
+  const sheet = ensureRegistrationsSheet_(ss);
+  const values = readRawRows_(sheet);
+  if (values.length === 0) return;
+
+  var colorCol = [];
+  var changed = false;
+  for (var i = 0; i < values.length; i++) {
+    var raw = String(values[i][8] || '').trim();
+    var mappedKey = COLOR_CODES[raw] || COLOR_CODES[raw.toLowerCase()];
+    var nextLabel = mappedKey ? COLOR_LABELS[mappedKey] : raw;
+    if (nextLabel !== raw) {
+      changed = true;
+      values[i][8] = nextLabel;
+    }
+    colorCol.push([nextLabel]);
+  }
+
+  if (changed) {
+    sheet.getRange(2, 9, values.length, 1).setValues(colorCol);
+  }
+  const updated = parseRegistrationsFromValues_(values);
+  rebuildSummarySheet_(ss, updated);
+}
+
